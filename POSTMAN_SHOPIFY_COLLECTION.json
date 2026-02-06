@@ -1,0 +1,151 @@
+{
+  "info": {
+    "_postman_id": "f9c3d1b1-1234-4a91-9e51-000000shopify",
+    "name": "FLEXI-POS Shopify Integration",
+    "description": "Collection to test Shopify integration endpoints. Set variables: baseUrl, token, storeName, storeUrl, apiPassword (or accessToken).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "1) Connect Shopify",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+        },
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"storeName\": \"{{storeName}}\",\n  \"storeUrl\": \"{{storeUrl}}\",\n  \"clientId\": \"{{clientId}}\",\n  \"clientSecret\": \"{{clientSecret}}\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/shopify/connect",
+          "host": ["{{baseUrl}}"],
+          "path": ["shopify", "connect"]
+        },
+        "description": "Connect an organization to its Shopify store using client credentials (OAuth 2.0). The system will automatically fetch and refresh access tokens every 24 hours."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status 201 or 200', function () { pm.expect(pm.response.code).to.be.oneOf([200,201]); });",
+              "pm.test('Success flag', function () { pm.expect(pm.response.json().success).to.eql(true); });"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ]
+    },
+    {
+      "name": "2) Connection Status",
+      "request": {
+        "auth": { "type": "bearer", "bearer": [{ "value": "{{token}}", "type": "string" }] },
+        "method": "GET",
+        "url": { "raw": "{{baseUrl}}/shopify/connection", "host": ["{{baseUrl}}"], "path": ["shopify", "connection"] },
+        "description": "Check if Shopify is connected for this organization."
+      }
+    },
+    {
+      "name": "3) List Products",
+      "request": {
+        "auth": { "type": "bearer", "bearer": [{ "value": "{{token}}", "type": "string" }] },
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/shopify/products?limit={{limit}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["shopify", "products"],
+          "query": [
+            { "key": "limit", "value": "{{limit}}", "description": "Default 50" },
+            { "key": "cursor", "value": "{{cursor}}", "description": "Pagination cursor (optional)" }
+          ]
+        },
+        "description": "Fetch Shopify products/variants with inventory. Uses Shopify API version 2026-01."
+      }
+    },
+    {
+      "name": "4) Sync Queue (pending/failed)",
+      "request": {
+        "auth": { "type": "bearer", "bearer": [{ "value": "{{token}}", "type": "string" }] },
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/shopify/sync-queue?status={{queueStatus}}&needsReview={{needsReview}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["shopify", "sync-queue"],
+          "query": [
+            { "key": "status", "value": "{{queueStatus}}", "description": "pending|processing|failed|completed|needs_review" },
+            { "key": "needsReview", "value": "{{needsReview}}", "description": "true|false" }
+          ]
+        },
+        "description": "Inspect retry queue items (e.g., failed inventory syncs)."
+      }
+    },
+    {
+      "name": "5) Sync Logs (history)",
+      "request": {
+        "auth": { "type": "bearer", "bearer": [{ "value": "{{token}}", "type": "string" }] },
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/shopify/sync-logs?syncType={{syncType}}&status={{syncStatus}}&limit=50",
+          "host": ["{{baseUrl}}"],
+          "path": ["shopify", "sync-logs"],
+          "query": [
+            { "key": "syncType", "value": "{{syncType}}", "description": "inventory_update|product_fetch|webhook_received" },
+            { "key": "status", "value": "{{syncStatus}}", "description": "success|failed|pending" },
+            { "key": "limit", "value": "50" }
+          ]
+        },
+        "description": "View sync history for debugging (inventory updates, product fetch, webhook received)."
+      }
+    },
+    {
+      "name": "7) Get Available Shopify Locations",
+      "request": {
+        "auth": { "type": "bearer", "bearer": [{ "value": "{{token}}", "type": "string" }] },
+        "method": "GET",
+        "url": { "raw": "{{baseUrl}}/locations/shopify/available-locations", "host": ["{{baseUrl}}"], "path": ["locations", "shopify", "available-locations"] },
+        "description": "Fetch all available Shopify locations for mapping. Call this after connecting to Shopify to see which locations are available."
+      }
+    },
+    {
+      "name": "8) Map FLEXI Location to Shopify",
+      "request": {
+        "auth": { "type": "bearer", "bearer": [{ "value": "{{token}}", "type": "string" }] },
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"shopifyLocationId\": \"{{shopifyLocationId}}\",\n  \"shopifyLocationName\": \"Main Warehouse\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/locations/{{locationId}}/set-shopify-location",
+          "host": ["{{baseUrl}}"],
+          "path": ["locations", "{{locationId}}", "set-shopify-location"]
+        },
+        "description": "Map a FLEXI location to a Shopify location. All inventory updates for this FLEXI location will use the mapped Shopify location."
+      }
+    }
+  ],
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:9200" },
+    { "key": "token", "value": "" },
+    { "key": "storeName", "value": "My Store" },
+    { "key": "storeUrl", "value": "your-store.myshopify.com" },
+    { "key": "clientId", "value": "" },
+    { "key": "clientSecret", "value": "" },
+    { "key": "locationId", "value": "" },
+    { "key": "shopifyLocationId", "value": "" },
+    { "key": "limit", "value": "50" },
+    { "key": "cursor", "value": "" },
+    { "key": "queueStatus", "value": "" },
+    { "key": "needsReview", "value": "" },
+    { "key": "syncType", "value": "" },
+    { "key": "syncStatus", "value": "" }
+  ]
+}

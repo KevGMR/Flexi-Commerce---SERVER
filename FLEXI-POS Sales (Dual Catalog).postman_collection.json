@@ -1,0 +1,384 @@
+{
+  "info": {
+    "_postman_id": "cd6de967-357b-4c49-afe0-ef389550cc31",
+    "name": "FLEXI-POS Sales (Dual Catalog)",
+    "description": "POS Sales endpoints - create sales with FLEXI and/or Shopify products, void, refund, and reporting",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "51601913",
+    "_collection_link": "https://go.postman.co/collection/51601913-cd6de967-357b-4c49-afe0-ef389550cc31?source=collection_link"
+  },
+  "item": [
+    {
+      "name": "1. Create Sale (Mixed Items)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "if (pm.response.code === 201) {",
+              "  var jsonData = pm.response.json();",
+              "  pm.environment.set('saleId', jsonData.data.saleId);",
+              "  pm.environment.set('receiptNumber', jsonData.data.receiptNumber);",
+              "  console.log('Sale ID: ' + jsonData.data.saleId);",
+              "  console.log('Receipt: ' + jsonData.data.receiptNumber);",
+              "}"
+            ],
+            "type": "text/javascript",
+            "packages": {},
+            "requests": {}
+          }
+        }
+      ],
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{token}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"locationId\": \"696fb09d006f8323184b8946\",\n  \"items\": [\n    {\n      \"type\": \"flexi\",\n      \"productId\": \"696fddca006f8323184b897c\",\n      \"quantity\": 2,\n      \"unitPrice\": 15.00,\n      \"discount\": 0,\n      \"taxAmount\": 2.40\n    },\n    {\n      \"type\": \"shopify\",\n      \"shopifyVariantId\": \"gid://shopify/ProductVariant/52040931246447\",\n      \"productName\": \"Shopify Blue Jeans\",\n      \"sku\": \"SHOP-JEANS-BLU-32\",\n      \"quantity\": 1,\n      \"unitPrice\": 45.00,\n      \"discount\": 5.00,\n      \"taxAmount\": 3.20\n    }\n  ],\n  \"customerId\": null,\n  \"paymentMethod\": \"cash\",\n  \"paymentStatus\": \"completed\",\n  \"notes\": \"Test sale\",\n  \"tags\": [\"test\"],\n  \"idempotencyKey\": \"unique-idempotency-key-11\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/sales",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "sales"
+          ]
+        },
+        "description": "Create a sale with items from both FLEXI catalog and Shopify. Automatically updates inventory for both systems."
+      },
+      "response": []
+    },
+    {
+      "name": "2. Create Sale (FLEXI Only)",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{token}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"locationId\": \"{{locationId}}\",\n  \"items\": [\n    {\n      \"type\": \"flexi\",\n      \"productId\": \"696fddca006f8323184b897c\",\n      \"quantity\": 3,\n      \"unitPrice\": 20.00,\n      \"discount\": 0,\n      \"taxAmount\": 4.80\n    }\n  ],\n  \"paymentMethod\": \"card\",\n  \"paymentStatus\": \"completed\",\n  \"idempotencyKey\": \"unique-idempotency-key-10\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/sales",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "sales"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "3. Create Sale (Shopify Only)",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{token}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"locationId\": \"{{locationId}}\",\n  \"items\": [\n    {\n      \"type\": \"shopify\",\n    \"shopifyVariantId\": \"gid://shopify/ProductVariant/52040931246447\",\n      \"productName\": \"Shopify Red T-Shirt\",\n      \"sku\": \"SHOP-TSHIRT-RED-M\",\n      \"quantity\": 1,\n      \"unitPrice\": 25.00,\n      \"discount\": 0,\n      \"taxAmount\": 4.00\n    },\n    {\n      \"type\": \"shopify\",\n    \"shopifyVariantId\": \"gid://shopify/ProductVariant/52040937111919\",\n      \"productName\": \"Shopify Red T-Shirt\",\n      \"sku\": \"SHOP-TSHIRT-RED-M\",\n      \"quantity\": 1,\n      \"unitPrice\": 25.00,\n      \"discount\": 0,\n      \"taxAmount\": 4.00\n    }\n  ],\n  \"paymentMethod\": \"mobile\",\n  \"paymentStatus\": \"completed\",\n  \"tags\": [\"test\"],\n  \"idempotencyKey\": \"unique-idempotency-key-20\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/sales",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "sales"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "4. Get Sale Details",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{token}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/sales/{{saleId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "sales",
+            "{{saleId}}"
+          ]
+        },
+        "description": "Get full sale details including inventory updates, Shopify sync status, etc."
+      },
+      "response": []
+    },
+    {
+      "name": "5. List Sales",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{token}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/sales?locationId={{locationId}}&status=completed&paymentMethod=&startDate=&endDate=&limit=20&page=1",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "sales"
+          ],
+          "query": [
+            {
+              "key": "locationId",
+              "value": "{{locationId}}",
+              "description": "Filter by location"
+            },
+            {
+              "key": "status",
+              "value": "completed",
+              "description": "completed|voided|pending|partial_refund"
+            },
+            {
+              "key": "paymentMethod",
+              "value": "",
+              "description": "cash|card|mobile|check|credit (optional)"
+            },
+            {
+              "key": "startDate",
+              "value": "",
+              "description": "ISO date (optional)"
+            },
+            {
+              "key": "endDate",
+              "value": "",
+              "description": "ISO date (optional)"
+            },
+            {
+              "key": "limit",
+              "value": "20"
+            },
+            {
+              "key": "page",
+              "value": "1"
+            }
+          ]
+        },
+        "description": "List all sales with pagination and filters. Returns summary (large arrays excluded)"
+      },
+      "response": []
+    },
+    {
+      "name": "6. Void Sale",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{token}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": ""
+        },
+        "url": {
+          "raw": "{{baseUrl}}/sales/{{saleId}}/void",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "sales",
+            "{{saleId}}",
+            "void"
+          ]
+        },
+        "description": "Void a completed sale. Marks as voided with reason and audits who voided it."
+      },
+      "response": []
+    },
+    {
+      "name": "7. Refund Sale (Partial)",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{token}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "\n{\n  \"items\": [\n    { \"itemIndex\": 0, \"quantity\": 1 }\n  ],\n  \"reason\": \"Customer returned defective items\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/sales/{{saleId}}/refund",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "sales",
+            "{{saleId}}",
+            "refund"
+          ]
+        },
+        "description": "Process a refund. If less than total = partial_refund, if full = voided."
+      },
+      "response": []
+    },
+    {
+      "name": "8. Sales Summary Report",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{token}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/sales/reports/summary?locationId={{locationId}}&startDate=2026-01-01&endDate=2026-01-31",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "sales",
+            "reports",
+            "summary"
+          ],
+          "query": [
+            {
+              "key": "locationId",
+              "value": "{{locationId}}",
+              "description": "Optional: filter by location"
+            },
+            {
+              "key": "startDate",
+              "value": "2026-01-01",
+              "description": "ISO date (optional)"
+            },
+            {
+              "key": "endDate",
+              "value": "2026-01-31",
+              "description": "ISO date (optional)"
+            }
+          ]
+        },
+        "description": "Get revenue summary: total sales, revenue, tax, discount, items by catalog type, payment methods"
+      },
+      "response": []
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:9200"
+    },
+    {
+      "key": "token",
+      "value": ""
+    },
+    {
+      "key": "locationId",
+      "value": ""
+    },
+    {
+      "key": "saleId",
+      "value": ""
+    },
+    {
+      "key": "receiptNumber",
+      "value": ""
+    }
+  ]
+}

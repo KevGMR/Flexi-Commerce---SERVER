@@ -1,0 +1,855 @@
+{
+  "info": {
+    "_postman_id": "56244ba4-85d9-4ca2-9717-a61976d92555",
+    "name": "FLEXI-POS Multi-Tenant Auth & Organizations",
+    "description": "Complete authentication flow with organizations for FLEXI-POS",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "51601913",
+    "_collection_link": "https://go.postman.co/collection/51601913-56244ba4-85d9-4ca2-9717-a61976d92555?source=collection_link"
+  },
+  "item": [
+    {
+      "name": "1. Register First User (Create Organization)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "if (pm.response.code === 201) {",
+              "  var jsonData = pm.response.json();",
+              "  pm.environment.set('userId', jsonData.user._id);",
+              "  pm.environment.set('userEmail', jsonData.user.email);",
+              "  pm.environment.set('organizationId', jsonData.organization._id);",
+              "  pm.environment.set('organizationSlug', jsonData.organization.slug);",
+              "  console.log('User ID: ' + jsonData.user._id);",
+              "  console.log('Organization ID: ' + jsonData.organization._id);",
+              "}"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"fullname\": \"John Doe\",\n  \"email\": \"john@example.com\",\n  \"password\": \"SecurePass123!\",\n  \"organizationName\": \"My Store\",\n  \"phone\": \"+1234567890\"\n}"
+        },
+        "url": {
+          "raw": "http://localhost:9200/users/new",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "9200",
+          "path": [
+            "users",
+            "new"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "2. Verify Email",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"token\": \"PASTE_TOKEN_FROM_EMAIL_OR_CONSOLE\"\n}"
+        },
+        "url": {
+          "raw": "http://localhost:9200/email-verification/verify/PASTE_TOKEN_FROM_EMAIL_OR_CONSOLE",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "9200",
+          "path": [
+            "email-verification",
+            "verify",
+            "PASTE_TOKEN_FROM_EMAIL_OR_CONSOLE"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "3. Login - Step 1 (Get Organizations)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "if (pm.response.code === 200) {",
+              "  var jsonData = pm.response.json();",
+              "  if (jsonData.organizations && jsonData.organizations.length > 0) {",
+              "    pm.environment.set('organizationId', jsonData.organizations[0].organizationId);",
+              "    console.log('Available organizations:');",
+              "    jsonData.organizations.forEach(org => {",
+              "      console.log('  - ' + org.name + ' (Role: ' + org.role + ')');",
+              "    });",
+              "  }",
+              "}"
+            ],
+            "type": "text/javascript",
+            "packages": {},
+            "requests": {}
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-Device-ID",
+            "value": "postman-device-001"
+          },
+          {
+            "key": "X-Device-Name",
+            "value": "Postman Testing"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"gatamukevin7@gmail.com\",\n  \"password\": \"SecurePass123!\"\n}"
+        },
+        "url": {
+          "raw": "http://localhost:9200/users/login",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "9200",
+          "path": [
+            "users",
+            "login"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "4. Login - Step 2 (Select Organization)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "if (pm.response.code === 200) {",
+              "  var jsonData = pm.response.json();",
+              "  pm.environment.set('accessToken', jsonData.accessToken);",
+              "  pm.environment.set('userId', jsonData.user._id);",
+              "  pm.environment.set('organizationId', jsonData.organization._id);",
+              "  console.log('Access Token stored');",
+              "  console.log('Logged into: ' + jsonData.organization.name);",
+              "}"
+            ],
+            "type": "text/javascript",
+            "packages": {},
+            "requests": {}
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-Device-ID",
+            "value": "postman-device-001"
+          },
+          {
+            "key": "X-Device-Name",
+            "value": "Postman Testing"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"gatamukevin7@gmail.com\",\n  \"password\": \"SecurePass123!\",\n  \"organizationId\": \"{{organizationId}}\"\n}"
+        },
+        "url": {
+          "raw": "http://localhost:9200/users/login",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "9200",
+          "path": [
+            "users",
+            "login"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "5. Get My Organizations",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          },
+          {
+            "key": "X-Device-ID",
+            "value": "postman-device-001"
+          }
+        ],
+        "url": {
+          "raw": "http://localhost:9200/users/organizations",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "9200",
+          "path": [
+            "users",
+            "organizations"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "6. Get Organization Details",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          },
+          {
+            "key": "X-Device-ID",
+            "value": "postman-device-001"
+          }
+        ],
+        "url": {
+          "raw": "http://localhost:9200/organizations/{{organizationId}}",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "9200",
+          "path": [
+            "organizations",
+            "{{organizationId}}"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "7. Update Organization Settings",
+      "request": {
+        "method": "PUT",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          },
+          {
+            "key": "X-Device-ID",
+            "value": "postman-device-001"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"My Updated Store\",\n  \"settings\": {\n    \"timezone\": \"America/New_York\",\n    \"currency\": \"USD\",\n    \"language\": \"en\",\n    \"taxRate\": 8.5\n  }\n}"
+        },
+        "url": {
+          "raw": "http://localhost:9200/organizations/{{organizationId}}",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "9200",
+          "path": [
+            "organizations",
+            "{{organizationId}}"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "8. Create New Organization (Existing User)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "if (pm.response.code === 201) {",
+              "  var jsonData = pm.response.json();",
+              "  console.log('New Organization Created: ' + jsonData.organization.name);",
+              "  console.log('Organization ID: ' + jsonData.organization._id);",
+              "  console.log('Slug: ' + jsonData.organization.slug);",
+              "}"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          },
+          {
+            "key": "X-Device-ID",
+            "value": "postman-device-123"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"organizationName\": \"My Second Store\"}"
+        },
+        "url": {
+          "raw": "http://localhost:9200/users/create-organization",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "9200",
+          "path": [
+            "users",
+            "create-organization"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "9. Invite User to Organization",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "if (pm.response.code === 201) {",
+              "  var jsonData = pm.response.json();",
+              "  console.log('Invitation sent to: ' + jsonData.invitation.email);",
+              "  console.log('Role: ' + jsonData.invitation.role);",
+              "  console.log('Expires: ' + jsonData.invitation.expiresAt);",
+              "}"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          },
+          {
+            "key": "X-Device-ID",
+            "value": "postman-device-001"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"employee@example.com\",\n  \"role\": \"Employee\"\n}"
+        },
+        "url": {
+          "raw": "http://localhost:9200/organizations/{{organizationId}}/invite",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "9200",
+          "path": [
+            "organizations",
+            "{{organizationId}}",
+            "invite"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "10. Register with Invitation Token",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"fullname\": \"Jane Smith\",\n  \"email\": \"employee@example.com\",\n  \"password\": \"SecurePass123!\",\n  \"invitationToken\": \"3b205039f9c199c085ec1189332a0ae2553a76702dca73e73dbc8477f5434169\",\n  \"phone\": \"+1234567891\"\n}"
+        },
+        "url": {
+          "raw": "http://localhost:9200/users/new",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "9200",
+          "path": [
+            "users",
+            "new"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "11. Get Organization Members",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          },
+          {
+            "key": "X-Device-ID",
+            "value": "postman-device-001"
+          }
+        ],
+        "url": {
+          "raw": "http://localhost:9200/organizations/{{organizationId}}/members",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "9200",
+          "path": [
+            "organizations",
+            "{{organizationId}}",
+            "members"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "12. Switch Organization",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "if (pm.response.code === 200) {",
+              "  var jsonData = pm.response.json();",
+              "  pm.environment.set('accessToken', jsonData.accessToken);",
+              "  pm.environment.set('organizationId', jsonData.organization._id);",
+              "  console.log('Switched to: ' + jsonData.organization.name);",
+              "}"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          },
+          {
+            "key": "X-Device-ID",
+            "value": "postman-device-001"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"organizationId\": \"PASTE_DIFFERENT_ORG_ID_HERE\"\n}"
+        },
+        "url": {
+          "raw": "http://localhost:9200/users/switch-organization",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "9200",
+          "path": [
+            "users",
+            "switch-organization"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "13. Refresh Token",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "if (pm.response.code === 200) {",
+              "  var jsonData = pm.response.json();",
+              "  pm.environment.set('accessToken', jsonData.accessToken);",
+              "  console.log('New Access Token stored');",
+              "}"
+            ],
+            "type": "text/javascript",
+            "packages": {},
+            "requests": {}
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "X-Device-ID",
+            "value": "postman-device-001"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "http://localhost:9200/users/refresh",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "9200",
+          "path": [
+            "users",
+            "refresh"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "13. Get Active Sessions/Devices",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          },
+          {
+            "key": "X-Device-ID",
+            "value": "postman-device-001"
+          }
+        ],
+        "url": {
+          "raw": "http://localhost:9200/users/devices",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "9200",
+          "path": [
+            "users",
+            "devices"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "15. Remove Organization Member",
+      "request": {
+        "method": "DELETE",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          },
+          {
+            "key": "X-Device-ID",
+            "value": "postman-device-001"
+          }
+        ],
+        "url": {
+          "raw": "http://localhost:9200/organizations/{{organizationId}}/members/696e454f57d32caf0688ae92",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "9200",
+          "path": [
+            "organizations",
+            "{{organizationId}}",
+            "members",
+            "696e454f57d32caf0688ae92"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "16. Logout",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          },
+          {
+            "key": "X-Device-ID",
+            "value": "postman-device-001"
+          }
+        ],
+        "url": {
+          "raw": "http://localhost:9200/users/logout",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "9200",
+          "path": [
+            "users",
+            "logout"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "17. Request Password Reset",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"gatamukevin7@gmail.com\"\n}"
+        },
+        "url": {
+          "raw": "http://localhost:9200/users/reset",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "9200",
+          "path": [
+            "users",
+            "reset"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "17. Reset Password with Token",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"password\": \"NewPassword123!\"\n}"
+        },
+        "url": {
+          "raw": "http://localhost:9200/users/reset/e73862a4c28805e647dd588890cb292459b5a60b4dd66bda95c125ca6d2a799d",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "9200",
+          "path": [
+            "users",
+            "reset",
+            "e73862a4c28805e647dd588890cb292459b5a60b4dd66bda95c125ca6d2a799d"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "19. Resend Email Verification",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"employee@example.com\"\n}"
+        },
+        "url": {
+          "raw": "http://localhost:9200/email-verification/resend",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "9200",
+          "path": [
+            "email-verification",
+            "resend"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "20. Get Audit Logs",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          },
+          {
+            "key": "X-Device-ID",
+            "value": "postman-device-001"
+          }
+        ],
+        "url": {
+          "raw": "http://localhost:9200/audit-logs?eventType=login_success&page=1&limit=50",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "9200",
+          "path": [
+            "audit-logs"
+          ],
+          "query": [
+            {
+              "key": "eventType",
+              "value": "login_success"
+            },
+            {
+              "key": "page",
+              "value": "1"
+            },
+            {
+              "key": "limit",
+              "value": "50"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "21. Test Missing Organization Context",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:9200/organizations/{{organizationId}}",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "9200",
+          "path": [
+            "organizations",
+            "{{organizationId}}"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "0. Server Health Check",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/health",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "health"
+          ]
+        },
+        "description": "Checking server health and keeping server active if on free tier"
+      },
+      "response": []
+    }
+  ],
+  "variable": [
+    {
+      "key": "accessToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "userId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "userEmail",
+      "value": "john@example.com",
+      "type": "string"
+    },
+    {
+      "key": "organizationId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "organizationSlug",
+      "value": "",
+      "type": "string"
+    }
+  ]
+}

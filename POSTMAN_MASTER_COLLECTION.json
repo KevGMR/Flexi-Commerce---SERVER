@@ -1,0 +1,3211 @@
+{
+  "info": {
+    "_postman_id": "master-flexi-pos-collection",
+    "name": "FLEXI-POS Master API Collection",
+    "description": "Comprehensive consolidated Postman collection for FLEXI-POS APIs. Includes authentication, E-commerce CRUD, sales operations, and Shopify integration.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "51601913"
+  },
+  "item": [
+    {
+      "name": "1. Authentication & Organizations",
+      "item": [
+        {
+          "name": "1. Register First User (Create Organization)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  var jsonData = pm.response.json();",
+                  "  pm.environment.set('userId', jsonData.user._id);",
+                  "  pm.environment.set('userEmail', jsonData.user.email);",
+                  "  pm.environment.set('organizationId', jsonData.organization._id);",
+                  "  pm.environment.set('organizationSlug', jsonData.organization.slug);",
+                  "  console.log('User ID: ' + jsonData.user._id);",
+                  "  console.log('Organization ID: ' + jsonData.organization._id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fullname\": \"John Doe\",\n  \"email\": \"john@example.com\",\n  \"password\": \"SecurePass123!\",\n  \"organizationName\": \"My Store\",\n  \"phone\": \"+1234567890\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:9200/users/new",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "9200",
+              "path": [
+                "users",
+                "new"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "2. Verify Email",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"PASTE_TOKEN_FROM_EMAIL_OR_CONSOLE\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:9200/email-verification/verify/PASTE_TOKEN_FROM_EMAIL_OR_CONSOLE",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "9200",
+              "path": [
+                "email-verification",
+                "verify",
+                "PASTE_TOKEN_FROM_EMAIL_OR_CONSOLE"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "3. Login - Step 1 (Get Organizations)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  var jsonData = pm.response.json();",
+                  "  if (jsonData.organizations && jsonData.organizations.length > 0) {",
+                  "    pm.environment.set('organizationId', jsonData.organizations[0].organizationId);",
+                  "    console.log('Available organizations:');",
+                  "    jsonData.organizations.forEach(org => {",
+                  "      console.log('  - ' + org.name + ' (Role: ' + org.role + ')');",
+                  "    });",
+                  "  }",
+                  "}"
+                ],
+                "type": "text/javascript",
+                "packages": {},
+                "requests": {}
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Device-ID",
+                "value": "postman-device-001"
+              },
+              {
+                "key": "X-Device-Name",
+                "value": "Postman Testing"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"gatamukevin7@gmail.com\",\n  \"password\": \"SecurePass123!\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:9200/users/login",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "9200",
+              "path": [
+                "users",
+                "login"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "4. Login - Step 2 (Select Organization)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  var jsonData = pm.response.json();",
+                  "  pm.environment.set('accessToken', jsonData.accessToken);",
+                  "  pm.environment.set('userId', jsonData.user._id);",
+                  "  pm.environment.set('organizationId', jsonData.organization._id);",
+                  "  console.log('Access Token stored');",
+                  "  console.log('Logged into: ' + jsonData.organization.name);",
+                  "}"
+                ],
+                "type": "text/javascript",
+                "packages": {},
+                "requests": {}
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Device-ID",
+                "value": "postman-device-001"
+              },
+              {
+                "key": "X-Device-Name",
+                "value": "Postman Testing"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"gatamukevin7@gmail.com\",\n  \"password\": \"SecurePass123!\",\n  \"organizationId\": \"{{organizationId}}\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:9200/users/login",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "9200",
+              "path": [
+                "users",
+                "login"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "5. Get My Organizations",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              },
+              {
+                "key": "X-Device-ID",
+                "value": "postman-device-001"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:9200/users/organizations",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "9200",
+              "path": [
+                "users",
+                "organizations"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "6. Get Organization Details",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              },
+              {
+                "key": "X-Device-ID",
+                "value": "postman-device-001"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:9200/organizations/{{organizationId}}",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "9200",
+              "path": [
+                "organizations",
+                "{{organizationId}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "7. Update Organization Settings",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              },
+              {
+                "key": "X-Device-ID",
+                "value": "postman-device-001"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"My Updated Store\",\n  \"settings\": {\n    \"timezone\": \"America/New_York\",\n    \"currency\": \"USD\",\n    \"language\": \"en\",\n    \"taxRate\": 8.5\n  }\n}"
+            },
+            "url": {
+              "raw": "http://localhost:9200/organizations/{{organizationId}}",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "9200",
+              "path": [
+                "organizations",
+                "{{organizationId}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "8. Create New Organization (Existing User)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  var jsonData = pm.response.json();",
+                  "  console.log('New Organization Created: ' + jsonData.organization.name);",
+                  "  console.log('Organization ID: ' + jsonData.organization._id);",
+                  "  console.log('Slug: ' + jsonData.organization.slug);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              },
+              {
+                "key": "X-Device-ID",
+                "value": "postman-device-123"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"organizationName\": \"My Second Store\"}"
+            },
+            "url": {
+              "raw": "http://localhost:9200/users/create-organization",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "9200",
+              "path": [
+                "users",
+                "create-organization"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "9. Invite User to Organization",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  var jsonData = pm.response.json();",
+                  "  console.log('Invitation sent to: ' + jsonData.invitation.email);",
+                  "  console.log('Role: ' + jsonData.invitation.role);",
+                  "  console.log('Expires: ' + jsonData.invitation.expiresAt);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              },
+              {
+                "key": "X-Device-ID",
+                "value": "postman-device-001"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"employee@example.com\",\n  \"role\": \"Employee\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:9200/organizations/{{organizationId}}/invite",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "9200",
+              "path": [
+                "organizations",
+                "{{organizationId}}",
+                "invite"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "10. Register with Invitation Token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fullname\": \"Jane Smith\",\n  \"email\": \"employee@example.com\",\n  \"password\": \"SecurePass123!\",\n  \"invitationToken\": \"3b205039f9c199c085ec1189332a0ae2553a76702dca73e73dbc8477f5434169\",\n  \"phone\": \"+1234567891\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:9200/users/new",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "9200",
+              "path": [
+                "users",
+                "new"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "11. Get Organization Members",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              },
+              {
+                "key": "X-Device-ID",
+                "value": "postman-device-001"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:9200/organizations/{{organizationId}}/members",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "9200",
+              "path": [
+                "organizations",
+                "{{organizationId}}",
+                "members"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "12. Switch Organization",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  var jsonData = pm.response.json();",
+                  "  pm.environment.set('accessToken', jsonData.accessToken);",
+                  "  pm.environment.set('organizationId', jsonData.organization._id);",
+                  "  console.log('Switched to: ' + jsonData.organization.name);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              },
+              {
+                "key": "X-Device-ID",
+                "value": "postman-device-001"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"organizationId\": \"PASTE_DIFFERENT_ORG_ID_HERE\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:9200/users/switch-organization",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "9200",
+              "path": [
+                "users",
+                "switch-organization"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "13. Get Active Sessions/Devices",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              },
+              {
+                "key": "X-Device-ID",
+                "value": "postman-device-001"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:9200/users/devices",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "9200",
+              "path": [
+                "users",
+                "devices"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "15. Remove Organization Member",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              },
+              {
+                "key": "X-Device-ID",
+                "value": "postman-device-001"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:9200/organizations/{{organizationId}}/members/696e454f57d32caf0688ae92",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "9200",
+              "path": [
+                "organizations",
+                "{{organizationId}}",
+                "members",
+                "696e454f57d32caf0688ae92"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "16. Logout",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              },
+              {
+                "key": "X-Device-ID",
+                "value": "postman-device-001"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:9200/users/logout",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "9200",
+              "path": [
+                "users",
+                "logout"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "19. Resend Email Verification",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"employee@example.com\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:9200/email-verification/resend",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "9200",
+              "path": [
+                "email-verification",
+                "resend"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "21. Test Missing Organization Context",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:9200/organizations/{{organizationId}}",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "9200",
+              "path": [
+                "organizations",
+                "{{organizationId}}"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "2. E-Commerce CRUD",
+      "item": [
+        {
+          "name": "PRODUCTS",
+          "item": [
+            {
+              "name": "Create Product",
+              "event": [
+                {
+                  "listen": "tests",
+                  "script": {
+                    "exec": [
+                      "if (pm.response.code === 201) {",
+                      "  var jsonData = pm.response.json();",
+                      "  pm.collectionVariables.set('productId', jsonData.product._id);",
+                      "  console.log('Product ID saved:', jsonData.product._id);",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"Gaming Laptop Pro\",\n  \"sku\": \"LAPTOP-001\",\n  \"price\": 1299.99,\n  \"compareAtPrice\": 1499.99,\n  \"cost\": 800,\n  \"type\": \"physical\",\n  \"weight\": 2.5,\n  \"weightUnit\": \"kg\",\n  \"images\": [\n    {\n      \"url\": \"https://cdn.example.com/laptop.jpg\",\n      \"alt\": \"Laptop front view\",\n      \"isDefault\": true\n    }\n  ],\n  \"tags\": [\"electronics\", \"gaming\", \"laptop\"],\n  \"vendor\": \"TechBrand\",\n  \"description\": \"High-performance gaming laptop with RTX 4090\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/products",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "products"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Get All Products",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/products?skip=0&limit=50&status=active",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "products"
+                  ],
+                  "query": [
+                    {
+                      "key": "skip",
+                      "value": "0"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "50"
+                    },
+                    {
+                      "key": "status",
+                      "value": "active"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Get Product by ID",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/products/{{productId}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "products",
+                    "{{productId}}"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Update Product",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"Gaming Laptop Pro Max\",\n  \"price\": 1399.99,\n  \"compareAtPrice\": 1599.99,\n  \"status\": \"active\"\n}"
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/products/{{productId}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "products",
+                    "{{productId}}"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Delete Product",
+              "request": {
+                "method": "DELETE",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/products/{{productId}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "products",
+                    "{{productId}}"
+                  ]
+                }
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "VARIANTS",
+          "item": [
+            {
+              "name": "Create Variant",
+              "event": [
+                {
+                  "listen": "tests",
+                  "script": {
+                    "exec": [
+                      "if (pm.response.code === 201) {",
+                      "  var jsonData = pm.response.json();",
+                      "  pm.collectionVariables.set('variantId', jsonData.variant._id);",
+                      "  console.log('Variant ID saved:', jsonData.variant._id);",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"productId\": \"{{productId}}\",\n  \"sku\": \"LAPTOP-001-BLACK\",\n  \"price\": 1299.99,\n  \"weight\": 2.5,\n  \"metafields\": [\n    {\"key\": \"color\", \"value\": \"Black\", \"namespace\": \"custom\"},\n    {\"key\": \"storage\", \"value\": \"1TB SSD\", \"namespace\": \"custom\"}\n  ],\n  \"barcode\": \"123456789012\"\n}"
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/variants",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "variants"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Get Variants by Product",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/variants?productId={{productId}}&skip=0&limit=50",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "variants"
+                  ],
+                  "query": [
+                    {
+                      "key": "productId",
+                      "value": "{{productId}}"
+                    },
+                    {
+                      "key": "skip",
+                      "value": "0"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "50"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Get Variant by ID",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/variants/{{variantId}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "variants",
+                    "{{variantId}}"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Update Variant",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"price\": 1399.99,\n  \"status\": \"active\"\n}"
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/variants/{{variantId}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "variants",
+                    "{{variantId}}"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Delete Variant",
+              "request": {
+                "method": "DELETE",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/variants/{{variantId}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "variants",
+                    "{{variantId}}"
+                  ]
+                }
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "COLLECTIONS",
+          "item": [
+            {
+              "name": "Create Collection",
+              "event": [
+                {
+                  "listen": "tests",
+                  "script": {
+                    "exec": [
+                      "if (pm.response.code === 201) {",
+                      "  var jsonData = pm.response.json();",
+                      "  pm.collectionVariables.set('collectionId', jsonData.collection._id);",
+                      "  console.log('Collection ID saved:', jsonData.collection._id);",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"Gaming Laptops\",\n  \"description\": \"High-performance gaming laptops\",\n  \"type\": \"manual\",\n  \"productIds\": [\"{{productId}}\"],\n  \"published\": true\n}"
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/collections",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "collections"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Get All Collections",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/collections?skip=0&limit=50",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "collections"
+                  ],
+                  "query": [
+                    {
+                      "key": "skip",
+                      "value": "0"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "50"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Get Collection by ID",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/collections/{{collectionId}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "collections",
+                    "{{collectionId}}"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Update Collection",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"Premium Gaming Laptops\",\n  \"description\": \"Premium high-performance gaming laptops\",\n  \"published\": true\n}"
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/collections/{{collectionId}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "collections",
+                    "{{collectionId}}"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Delete Collection",
+              "request": {
+                "method": "DELETE",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/collections/{{collectionId}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "collections",
+                    "{{collectionId}}"
+                  ]
+                }
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "LOCATIONS",
+          "item": [
+            {
+              "name": "Create Location",
+              "event": [
+                {
+                  "listen": "tests",
+                  "script": {
+                    "exec": [
+                      "if (pm.response.code === 201) {",
+                      "  var jsonData = pm.response.json();",
+                      "  pm.collectionVariables.set('locationId', jsonData.location._id);",
+                      "  console.log('Location ID saved:', jsonData.location._id);",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{token}}",
+                      "type": "string"
+                    },
+                    {
+                      "key": "undefined",
+                      "value": "{{token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"Main Warehouse\",\n  \"locationType\": \"warehouse\",\n  \"address\": {\n    \"street\": \"123 Tech Ave\",\n    \"city\": \"San Francisco\",\n    \"state\": \"CA\",\n    \"postalCode\": \"94105\",\n    \"country\": \"USA\"\n  },\n  \"taxRate\": 0.0725,\n  \"taxId\": \"98-1234567\",\n  \"currency\": \"USD\",\n  \"isDefault\": true\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/locations",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "locations"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Get All Locations",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/locations?skip=0&limit=50",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "locations"
+                  ],
+                  "query": [
+                    {
+                      "key": "skip",
+                      "value": "0"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "50"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Get Location by ID",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/locations/{{locationId}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "locations",
+                    "{{locationId}}"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Update Location",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"taxRate\": 0.0850,\n  \"currency\": \"USD\"\n}"
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/locations/{{locationId}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "locations",
+                    "{{locationId}}"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Delete Location",
+              "request": {
+                "method": "DELETE",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/locations/{{locationId}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "locations",
+                    "{{locationId}}"
+                  ]
+                }
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "INVENTORY",
+          "item": [
+            {
+              "name": "Initialize Inventory",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"variantId\": \"{{variantId}}\",\n  \"locationId\": \"{{locationId}}\",\n  \"onHand\": 100,\n  \"reorderPoint\": 20,\n  \"reorderQuantity\": 50\n}"
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/inventory",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "inventory"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Get All Inventory",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/inventory?skip=0&limit=50",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "inventory"
+                  ],
+                  "query": [
+                    {
+                      "key": "skip",
+                      "value": "0"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "50"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Get Inventory Detail",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/inventory/{{variantId}}/{{locationId}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "inventory",
+                    "{{variantId}}",
+                    "{{locationId}}"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Adjust Inventory",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"onHandAdjustment\": 10,\n  \"reason\": \"Stock recount adjustment\"\n}"
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/inventory/{{variantId}}/{{locationId}}/adjust",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "inventory",
+                    "{{variantId}}",
+                    "{{locationId}}",
+                    "adjust"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Update Reorder Levels",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"reorderPoint\": 25,\n  \"reorderQuantity\": 75\n}"
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/inventory/{{variantId}}/{{locationId}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "inventory",
+                    "{{variantId}}",
+                    "{{locationId}}"
+                  ]
+                }
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "INVENTORY AUDIT",
+          "item": [
+            {
+              "name": "Get Audit Trail",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/inventory-audit?skip=0&limit=50",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "inventory-audit"
+                  ],
+                  "query": [
+                    {
+                      "key": "skip",
+                      "value": "0"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "50"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Get Variant Audit Trail",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/inventory-audit/{{variantId}}/{{locationId}}?skip=0&limit=50",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "inventory-audit",
+                    "{{variantId}}",
+                    "{{locationId}}"
+                  ],
+                  "query": [
+                    {
+                      "key": "skip",
+                      "value": "0"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "50"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "SUPPLIERS",
+          "item": [
+            {
+              "name": "Create Supplier",
+              "event": [
+                {
+                  "listen": "tests",
+                  "script": {
+                    "exec": [
+                      "if (pm.response.code === 201) {",
+                      "  var jsonData = pm.response.json();",
+                      "  pm.collectionVariables.set('supplierId', jsonData.supplier._id);",
+                      "  console.log('Supplier ID saved:', jsonData.supplier._id);",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"TechSupply Co\",\n  \"email\": \"sales@techsupply.com\",\n  \"phone\": \"+1-555-0100\",\n  \"address\": {\n    \"street\": \"456 Supply Way\",\n    \"city\": \"Portland\",\n    \"state\": \"OR\",\n    \"postalCode\": \"97201\",\n    \"country\": \"USA\"\n  },\n  \"contactPerson\": \"John Supplier\",\n  \"paymentTerms\": \"Net 30\",\n  \"paymentMethod\": \"bank_transfer\",\n  \"taxId\": \"98-7654321\",\n  \"currency\": \"USD\",\n  \"rating\": 4.5\n}"
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/suppliers",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "suppliers"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Get All Suppliers",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/suppliers?status=active&skip=0&limit=50",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "suppliers"
+                  ],
+                  "query": [
+                    {
+                      "key": "status",
+                      "value": "active"
+                    },
+                    {
+                      "key": "skip",
+                      "value": "0"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "50"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Get Supplier by ID",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/suppliers/{{supplierId}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "suppliers",
+                    "{{supplierId}}"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Update Supplier",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"paymentTerms\": \"Net 45\",\n  \"rating\": 4.8\n}"
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/suppliers/{{supplierId}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "suppliers",
+                    "{{supplierId}}"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Delete Supplier",
+              "request": {
+                "method": "DELETE",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/suppliers/{{supplierId}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "suppliers",
+                    "{{supplierId}}"
+                  ]
+                }
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "PURCHASE ORDERS",
+          "item": [
+            {
+              "name": "Create Purchase Order",
+              "event": [
+                {
+                  "listen": "tests",
+                  "script": {
+                    "exec": [
+                      "if (pm.response.code === 201) {",
+                      "  var jsonData = pm.response.json();",
+                      "  pm.collectionVariables.set('purchaseOrderId', jsonData.po._id);",
+                      "  pm.collectionVariables.set('poNumber', jsonData.po.poNumber);",
+                      "  console.log('PO ID saved:', jsonData.po._id);",
+                      "  console.log('PO Number:', jsonData.po.poNumber);",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"supplierId\": \"{{supplierId}}\",\n  \"receivingLocationId\": \"{{locationId}}\",\n  \"items\": [\n    {\n      \"variantId\": \"{{variantId}}\",\n      \"quantity\": 50,\n      \"unitCost\": 900\n    }\n  ],\n  \"totals\": {\n    \"subtotal\": 45000,\n    \"tax\": 3150,\n    \"shipping\": 500,\n    \"total\": 48650\n  },\n  \"notes\": \"Urgent order\"\n}"
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/purchase-orders",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "purchase-orders"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Get All Purchase Orders",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/purchase-orders?status=draft&skip=0&limit=50",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "purchase-orders"
+                  ],
+                  "query": [
+                    {
+                      "key": "status",
+                      "value": "draft"
+                    },
+                    {
+                      "key": "skip",
+                      "value": "0"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "50"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Get Purchase Order by ID",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/purchase-orders/{{purchaseOrderId}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "purchase-orders",
+                    "{{purchaseOrderId}}"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Send Purchase Order",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/purchase-orders/{{purchaseOrderId}}/send",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "purchase-orders",
+                    "{{purchaseOrderId}}",
+                    "send"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Confirm Purchase Order",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/purchase-orders/{{purchaseOrderId}}/confirm",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "purchase-orders",
+                    "{{purchaseOrderId}}",
+                    "confirm"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Receive Purchase Order Items",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"itemReceivingQty\": [\n    {\n      \"variantId\": \"{{variantId}}\",\n      \"receivedQuantity\": 50\n    }\n  ]\n}"
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/purchase-orders/{{purchaseOrderId}}/receive",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "purchase-orders",
+                    "{{purchaseOrderId}}",
+                    "receive"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Cancel Purchase Order",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/purchase-orders/{{purchaseOrderId}}/cancel",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "purchase-orders",
+                    "{{purchaseOrderId}}",
+                    "cancel"
+                  ]
+                }
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "TRANSFERS",
+          "item": [
+            {
+              "name": "Create Transfer",
+              "event": [
+                {
+                  "listen": "tests",
+                  "script": {
+                    "exec": [
+                      "if (pm.response.code === 201) {",
+                      "  var jsonData = pm.response.json();",
+                      "  pm.collectionVariables.set('transferId', jsonData.transfer._id);",
+                      "  console.log('Transfer ID saved:', jsonData.transfer._id);",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"fromLocationId\": \"{{locationId}}\",\n  \"toLocationId\": \"{{location2Id}}\",\n  \"items\": [\n    {\n      \"variantId\": \"{{variantId}}\",\n      \"quantity\": 25\n    }\n  ],\n  \"reason\": \"rebalancing\",\n  \"notes\": \"Moving excess stock to retail location\"\n}"
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/transfers",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "transfers"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Get All Transfers",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/transfers?status=pending&skip=0&limit=50",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "transfers"
+                  ],
+                  "query": [
+                    {
+                      "key": "status",
+                      "value": "pending"
+                    },
+                    {
+                      "key": "skip",
+                      "value": "0"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "50"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Get Transfer by ID",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/transfers/{{transferId}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "transfers",
+                    "{{transferId}}"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Ship Transfer",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/transfers/{{transferId}}/ship",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "transfers",
+                    "{{transferId}}",
+                    "ship"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Receive Transfer",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"itemReceivingQty\": [\n    {\n      \"variantId\": \"{{variantId}}\",\n      \"receivedQuantity\": 25\n    }\n  ]\n}"
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/transfers/{{transferId}}/receive",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "transfers",
+                    "{{transferId}}",
+                    "receive"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Cancel Transfer",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/transfers/{{transferId}}/cancel",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "transfers",
+                    "{{transferId}}",
+                    "cancel"
+                  ]
+                }
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "GIFT CARDS",
+          "item": [
+            {
+              "name": "Create Gift Card",
+              "event": [
+                {
+                  "listen": "tests",
+                  "script": {
+                    "exec": [
+                      "if (pm.response.code === 201) {",
+                      "  var jsonData = pm.response.json();",
+                      "  pm.collectionVariables.set('giftCardId', jsonData.giftCard._id);",
+                      "  pm.collectionVariables.set('giftCardCode', jsonData.giftCard.code);",
+                      "  console.log('Gift Card ID saved:', jsonData.giftCard._id);",
+                      "  console.log('Gift Card Code:', jsonData.giftCard.code);",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"initialBalance\": 500,\n  \"currency\": \"USD\",\n  \"expiryDate\": \"2025-12-31\",\n  \"notes\": \"Birthday gift card\"\n}"
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/gift-cards",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "gift-cards"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Get All Gift Cards",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/gift-cards?status=active&skip=0&limit=50",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "gift-cards"
+                  ],
+                  "query": [
+                    {
+                      "key": "status",
+                      "value": "active"
+                    },
+                    {
+                      "key": "skip",
+                      "value": "0"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "50"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Lookup Gift Card by Code",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/gift-cards/lookup/{{giftCardCode}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "gift-cards",
+                    "lookup",
+                    "{{giftCardCode}}"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Get Gift Card by ID",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/gift-cards/{{giftCardId}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "gift-cards",
+                    "{{giftCardId}}"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Redeem Gift Card",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"amountRedeemed\": 150,\n  \"orderId\": \"ORDER-12345\"\n}"
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/gift-cards/{{giftCardId}}/redeem",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "gift-cards",
+                    "{{giftCardId}}",
+                    "redeem"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Update Gift Card",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"notes\": \"Updated notes\",\n  \"status\": \"active\"\n}"
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/gift-cards/{{giftCardId}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "gift-cards",
+                    "{{giftCardId}}"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Deactivate Gift Card",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/gift-cards/{{giftCardId}}/deactivate",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "gift-cards",
+                    "{{giftCardId}}",
+                    "deactivate"
+                  ]
+                }
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "3) List Products",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "undefined",
+                  "value": "{{token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/shopify/products?limit={{limit}}&cursor={{cursor}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "shopify",
+                "products"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "{{limit}}",
+                  "description": "Default 50"
+                },
+                {
+                  "key": "cursor",
+                  "value": "{{cursor}}",
+                  "description": "Pagination cursor (optional)"
+                }
+              ]
+            },
+            "description": "Fetch Shopify products/variants with inventory. Uses Shopify API version 2026-01."
+          },
+          "response": []
+        },
+        {
+          "name": "7) Get Available Shopify Locations",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{token}}",
+                  "type": "string"
+                },
+                {
+                  "key": "undefined",
+                  "value": "{{token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/locations/shopify/available-locations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "locations",
+                "shopify",
+                "available-locations"
+              ]
+            },
+            "description": "Fetch all available Shopify locations for mapping. Call this after connecting to Shopify to see which locations are available."
+          },
+          "response": []
+        },
+        {
+          "name": "8) Map FLEXI Location to Shopify",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                },
+                {
+                  "key": "undefined",
+                  "value": "{{token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"shopifyLocationId\": \"{{shopifyLocationId}}\",\n  \"shopifyLocationName\": \"Main Warehouse\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/locations/{{locationId}}/set-shopify-location",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "locations",
+                "{{locationId}}",
+                "set-shopify-location"
+              ]
+            },
+            "description": "Map a FLEXI location to a Shopify location. All inventory updates for this FLEXI location will use the mapped Shopify location."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "3. Sales Operations",
+      "item": [
+        {
+          "name": "1. Create Sale (Mixed Items)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  var jsonData = pm.response.json();",
+                  "  pm.environment.set('saleId', jsonData.data.saleId);",
+                  "  pm.environment.set('receiptNumber', jsonData.data.receiptNumber);",
+                  "  console.log('Sale ID: ' + jsonData.data.saleId);",
+                  "  console.log('Receipt: ' + jsonData.data.receiptNumber);",
+                  "}"
+                ],
+                "type": "text/javascript",
+                "packages": {},
+                "requests": {}
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"locationId\": \"696fb09d006f8323184b8946\",\n  \"items\": [\n    {\n      \"type\": \"flexi\",\n      \"productId\": \"696fddca006f8323184b897c\",\n      \"quantity\": 2,\n      \"unitPrice\": 15.00,\n      \"discount\": 0,\n      \"taxAmount\": 2.40\n    },\n    {\n      \"type\": \"shopify\",\n      \"shopifyVariantId\": \"gid://shopify/ProductVariant/52040931246447\",\n      \"productName\": \"Shopify Blue Jeans\",\n      \"sku\": \"SHOP-JEANS-BLU-32\",\n      \"quantity\": 1,\n      \"unitPrice\": 45.00,\n      \"discount\": 5.00,\n      \"taxAmount\": 3.20\n    }\n  ],\n  \"customerId\": null,\n  \"paymentMethod\": \"cash\",\n  \"paymentStatus\": \"completed\",\n  \"notes\": \"Test sale\",\n  \"tags\": [\"test\"],\n  \"idempotencyKey\": \"unique-idempotency-key-11\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/sales",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sales"
+              ]
+            },
+            "description": "Create a sale with items from both FLEXI catalog and Shopify. Automatically updates inventory for both systems."
+          },
+          "response": []
+        },
+        {
+          "name": "2. Create Sale (FLEXI Only)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"locationId\": \"{{locationId}}\",\n  \"items\": [\n    {\n      \"type\": \"flexi\",\n      \"productId\": \"696fddca006f8323184b897c\",\n      \"quantity\": 3,\n      \"unitPrice\": 20.00,\n      \"discount\": 0,\n      \"taxAmount\": 4.80\n    }\n  ],\n  \"paymentMethod\": \"card\",\n  \"paymentStatus\": \"completed\",\n  \"idempotencyKey\": \"unique-idempotency-key-10\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/sales",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sales"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "3. Create Sale (Shopify Only)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"locationId\": \"{{locationId}}\",\n  \"items\": [\n    {\n      \"type\": \"shopify\",\n    \"shopifyVariantId\": \"gid://shopify/ProductVariant/52040931246447\",\n      \"productName\": \"Shopify Red T-Shirt\",\n      \"sku\": \"SHOP-TSHIRT-RED-M\",\n      \"quantity\": 1,\n      \"unitPrice\": 25.00,\n      \"discount\": 0,\n      \"taxAmount\": 4.00\n    },\n    {\n      \"type\": \"shopify\",\n    \"shopifyVariantId\": \"gid://shopify/ProductVariant/52040937111919\",\n      \"productName\": \"Shopify Red T-Shirt\",\n      \"sku\": \"SHOP-TSHIRT-RED-M\",\n      \"quantity\": 1,\n      \"unitPrice\": 25.00,\n      \"discount\": 0,\n      \"taxAmount\": 4.00\n    }\n  ],\n  \"paymentMethod\": \"mobile\",\n  \"paymentStatus\": \"completed\",\n  \"tags\": [\"test\"],\n  \"idempotencyKey\": \"unique-idempotency-key-20\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/sales",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sales"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "4. Get Sale Details",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/sales/{{saleId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sales",
+                "{{saleId}}"
+              ]
+            },
+            "description": "Get full sale details including inventory updates, Shopify sync status, etc."
+          },
+          "response": []
+        },
+        {
+          "name": "5. List Sales",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/sales?locationId={{locationId}}&status=completed&paymentMethod=&startDate=&endDate=&limit=20&page=1",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sales"
+              ],
+              "query": [
+                {
+                  "key": "locationId",
+                  "value": "{{locationId}}",
+                  "description": "Filter by location"
+                },
+                {
+                  "key": "status",
+                  "value": "completed",
+                  "description": "completed|voided|pending|partial_refund"
+                },
+                {
+                  "key": "paymentMethod",
+                  "value": "",
+                  "description": "cash|card|mobile|check|credit (optional)"
+                },
+                {
+                  "key": "startDate",
+                  "value": "",
+                  "description": "ISO date (optional)"
+                },
+                {
+                  "key": "endDate",
+                  "value": "",
+                  "description": "ISO date (optional)"
+                },
+                {
+                  "key": "limit",
+                  "value": "20"
+                },
+                {
+                  "key": "page",
+                  "value": "1"
+                }
+              ]
+            },
+            "description": "List all sales with pagination and filters. Returns summary (large arrays excluded)"
+          },
+          "response": []
+        },
+        {
+          "name": "6. Void Sale",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": ""
+            },
+            "url": {
+              "raw": "{{baseUrl}}/sales/{{saleId}}/void",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sales",
+                "{{saleId}}",
+                "void"
+              ]
+            },
+            "description": "Void a completed sale. Marks as voided with reason and audits who voided it."
+          },
+          "response": []
+        },
+        {
+          "name": "7. Refund Sale (Partial)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "\n{\n  \"items\": [\n    { \"itemIndex\": 0, \"quantity\": 1 }\n  ],\n  \"reason\": \"Customer returned defective items\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/sales/{{saleId}}/refund",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sales",
+                "{{saleId}}",
+                "refund"
+              ]
+            },
+            "description": "Process a refund. If less than total = partial_refund, if full = voided."
+          },
+          "response": []
+        },
+        {
+          "name": "8. Sales Summary Report",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/sales/reports/summary?locationId={{locationId}}&startDate=2026-01-01&endDate=2026-01-31",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sales",
+                "reports",
+                "summary"
+              ],
+              "query": [
+                {
+                  "key": "locationId",
+                  "value": "{{locationId}}",
+                  "description": "Optional: filter by location"
+                },
+                {
+                  "key": "startDate",
+                  "value": "2026-01-01",
+                  "description": "ISO date (optional)"
+                },
+                {
+                  "key": "endDate",
+                  "value": "2026-01-31",
+                  "description": "ISO date (optional)"
+                }
+              ]
+            },
+            "description": "Get revenue summary: total sales, revenue, tax, discount, items by catalog type, payment methods"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "4. Shopify Integration",
+      "item": [
+        {
+          "name": "1) Connect Shopify",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 201 or 200', function () { pm.expect(pm.response.code).to.be.oneOf([200,201]); });",
+                  "pm.test('Success flag', function () { pm.expect(pm.response.json().success).to.eql(true); });"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"storeName\": \"{{storeName}}\",\n  \"storeUrl\": \"{{storeUrl}}\",\n  \"clientId\": \"{{clientId}}\",\n  \"clientSecret\": \"{{clientSecret}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/shopify/connect",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "shopify",
+                "connect"
+              ]
+            },
+            "description": "Connect an organization to its Shopify store using client credentials (OAuth 2.0). The system will automatically fetch and refresh access tokens every 24 hours."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "5. Uncategorized",
+      "item": [
+        {
+          "name": "13. Refresh Token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  var jsonData = pm.response.json();",
+                  "  pm.environment.set('accessToken', jsonData.accessToken);",
+                  "  console.log('New Access Token stored');",
+                  "}"
+                ],
+                "type": "text/javascript",
+                "packages": {},
+                "requests": {}
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Device-ID",
+                "value": "postman-device-001"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "http://localhost:9200/users/refresh",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "9200",
+              "path": [
+                "users",
+                "refresh"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "17. Request Password Reset",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"gatamukevin7@gmail.com\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:9200/users/reset",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "9200",
+              "path": [
+                "users",
+                "reset"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "17. Reset Password with Token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"password\": \"NewPassword123!\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:9200/users/reset/e73862a4c28805e647dd588890cb292459b5a60b4dd66bda95c125ca6d2a799d",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "9200",
+              "path": [
+                "users",
+                "reset",
+                "e73862a4c28805e647dd588890cb292459b5a60b4dd66bda95c125ca6d2a799d"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "20. Get Audit Logs",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              },
+              {
+                "key": "X-Device-ID",
+                "value": "postman-device-001"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:9200/audit-logs?eventType=login_success&page=1&limit=50",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "9200",
+              "path": [
+                "audit-logs"
+              ],
+              "query": [
+                {
+                  "key": "eventType",
+                  "value": "login_success"
+                },
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "0. Server Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "Checking server health and keeping server active if on free tier"
+          },
+          "response": []
+        },
+        {
+          "name": "2) Connection Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/shopify/connection",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "shopify",
+                "connection"
+              ]
+            },
+            "description": "Check if Shopify is connected for this organization."
+          },
+          "response": []
+        },
+        {
+          "name": "4) Sync Queue (pending/failed)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "undefined",
+                  "value": "{{token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/shopify/sync-queue?status={{queueStatus}}&needsReview={{needsReview}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "shopify",
+                "sync-queue"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "{{queueStatus}}",
+                  "description": "pending|processing|failed|completed|needs_review"
+                },
+                {
+                  "key": "needsReview",
+                  "value": "{{needsReview}}",
+                  "description": "true|false"
+                }
+              ]
+            },
+            "description": "Inspect retry queue items (e.g., failed inventory syncs)."
+          },
+          "response": []
+        },
+        {
+          "name": "5) Sync Logs (history)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "undefined",
+                  "value": "{{token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/shopify/sync-logs?syncType={{syncType}}&status={{syncStatus}}&limit=50",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "shopify",
+                "sync-logs"
+              ],
+              "query": [
+                {
+                  "key": "syncType",
+                  "value": "{{syncType}}",
+                  "description": "inventory_update|product_fetch|webhook_received"
+                },
+                {
+                  "key": "status",
+                  "value": "{{syncStatus}}",
+                  "description": "success|failed|pending"
+                },
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            },
+            "description": "View sync history for debugging (inventory updates, product fetch, webhook received)."
+          },
+          "response": []
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:9200",
+      "type": "string"
+    },
+    {
+      "key": "accessToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "organizationId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "userId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "locationId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "productId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "variantId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "collectionId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "supplierId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "purchaseOrderId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "transferId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "giftCardId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "saleId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "receiptNumber",
+      "value": "",
+      "type": "string"
+    }
+  ]
+}
