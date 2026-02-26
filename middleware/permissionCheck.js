@@ -1,4 +1,5 @@
 const User = require("../models/User");
+const UserOrganization = require("../models/UserOrganization");
 const { isCriticalPermission } = require("../config/permissions");
 const { logPermissionDenied } = require("../services/auditLogger");
 
@@ -9,11 +10,12 @@ const { logPermissionDenied } = require("../services/auditLogger");
 const requirePermission = (permission) => {
   return async (req, res, next) => {
     try {
-      const { userId, permissions } = req.user;
+      const { userId, organizationId, permissions } = req.user;
 
       // For critical permissions, check database for latest permissions
       if (isCriticalPermission(permission)) {
-        const user = await User.findById(userId).select("permissions status");
+        // Check user status
+        const user = await User.findById(userId).select("status");
 
         if (!user) {
           return res.status(401).json({
@@ -35,8 +37,34 @@ const requirePermission = (permission) => {
           });
         }
 
+        // Check permissions from UserOrganization
+        const userOrg = await UserOrganization.findOne({
+          userId,
+          organizationId
+        }).select("permissions status");
+
+        if (!userOrg) {
+          return res.status(401).json({
+            error: "Organization membership not found",
+          });
+        }
+
+        if (userOrg.status !== "active") {
+          await logPermissionDenied(
+            userId,
+            permission,
+            req.originalUrl,
+            req.ip,
+            "Organization membership is not active"
+          );
+
+          return res.status(403).json({
+            error: "Organization membership is not active",
+          });
+        }
+
         // Check if user has the permission in database
-        if (!user.permissions.includes(permission)) {
+        if (!userOrg.permissions || !userOrg.permissions.includes(permission)) {
           await logPermissionDenied(
             userId,
             permission,
@@ -52,7 +80,7 @@ const requirePermission = (permission) => {
         }
       } else {
         // For non-critical permissions, trust JWT
-        if (!permissions.includes(permission)) {
+        if (!permissions || !permissions.includes(permission)) {
           await logPermissionDenied(
             userId,
             permission,
@@ -109,7 +137,7 @@ const requireAnyPermission = (permissions) => {
 
         // Check if user has any of the permissions
         const hasPermission = permissions.some((p) =>
-          user.permissions.includes(p)
+          user.permissions && user.permissions.includes(p)
         );
 
         if (!hasPermission) {
@@ -129,7 +157,7 @@ const requireAnyPermission = (permissions) => {
       } else {
         // Trust JWT for non-critical
         const hasPermission = permissions.some((p) =>
-          userPermissions.includes(p)
+          userPermissions && userPermissions.includes(p)
         );
 
         if (!hasPermission) {
@@ -189,7 +217,7 @@ const requireAllPermissions = (permissions) => {
 
         // Check if user has all permissions
         const hasAllPermissions = permissions.every((p) =>
-          user.permissions.includes(p)
+          user.permissions && user.permissions.includes(p)
         );
 
         if (!hasAllPermissions) {
@@ -209,7 +237,7 @@ const requireAllPermissions = (permissions) => {
       } else {
         // Trust JWT for non-critical
         const hasAllPermissions = permissions.every((p) =>
-          userPermissions.includes(p)
+          userPermissions && userPermissions.includes(p)
         );
 
         if (!hasAllPermissions) {

@@ -17,7 +17,6 @@ const invitationSchema = new Schema(
     role: {
       type: String,
       default: "Employee",
-      enum: ["Owner", "Manager", "Cashier", "Employee"],
     },
     permissions: {
       type: [String],

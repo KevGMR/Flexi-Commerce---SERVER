@@ -59,7 +59,7 @@ router.post("/roles", requirePermission(PERMISSIONS.MANAGE_ROLES), async (req, r
 
     await role.save();
 
-    await logRoleChange(req.user.userId, role._id, "created", {
+    await logRoleChange(req.user.userId, role._id, "created", req.ip, {
       details: `Role created: ${name}`,
       permissions,
     });
@@ -119,7 +119,7 @@ router.put("/roles/:roleId", requirePermission(PERMISSIONS.MANAGE_ROLES), async 
       );
     }
 
-    await logRoleChange(req.user.userId, roleId, "updated", {
+    await logRoleChange(req.user.userId, roleId, "updated", req.ip, {
       details: `Role updated: ${role.name}`,
       oldPermissions,
       newPermissions: role.permissions,
@@ -171,7 +171,7 @@ router.delete("/roles/:roleId", requirePermission(PERMISSIONS.MANAGE_ROLES), asy
 
     await role.deleteOne();
 
-    await logRoleChange(req.user.userId, roleId, "deleted", {
+    await logRoleChange(req.user.userId, roleId, "deleted", req.ip, {
       details: `Role deleted: ${role.name}, ${usersWithRole.length} users reassigned to Employee`,
     });
 

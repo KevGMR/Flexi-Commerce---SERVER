@@ -438,6 +438,7 @@ router.post("/refresh", refreshLimiter, extractDeviceId, verifyRefreshTokenMiddl
     const { accessToken, refreshToken: newRefreshToken } = await rotateRefreshToken(
       refreshToken,
       user._id,
+      membership.role,
       membership.permissions,
       req.deviceId,
       req.ip,

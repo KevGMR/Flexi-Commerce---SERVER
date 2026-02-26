@@ -105,6 +105,62 @@ const saleSchema = new mongoose.Schema(
       min: 0,
     },
 
+    // Delivery information
+    deliveryFeeId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "DeliveryFee",
+      index: true,
+    },
+    deliveryFeeAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    requiresDelivery: {
+      type: Boolean,
+      default: false,
+    },
+    deliveryStatus: {
+      type: String,
+      enum: [
+        "pending",
+        "assigned",
+        "in_transit",
+        "delivered",
+        "cancelled",
+        "failed",
+        "not_required",
+      ],
+      default: "not_required",
+    },
+    // Delivery category information (snapshot at time of sale)
+    deliveryCategory: {
+      type: String,
+      sparse: true,
+      index: true,
+    },
+    deliveryOption: {
+      type: String,
+      sparse: true,
+    },
+    categoryStatus: {
+      type: String,
+      enum: [
+        "pending",
+        "ready",
+        "ready_for_pickup",
+        "in_transit",
+        "delivered",
+        "picked_up",
+        "cancelled",
+        "failed",
+        "completed",
+      ],
+      sparse: true,
+    },
+    // For syncing with DeliveryFee's categoryStatus changes
+    deliveryStatusSyncedAt: Date,
+
     // Payment (legacy single-field + new split payments)
     paymentMethod: {
       type: String,
@@ -138,7 +194,7 @@ const saleSchema = new mongoose.Schema(
     ],
     paymentStatus: {
       type: String,
-      enum: ["completed", "pending", "failed"],
+      enum: ["completed", "pending", "failed", "partial"],
       default: "pending",
     },
 
@@ -263,9 +319,27 @@ saleSchema.index({ status: 1, createdAt: -1 }); // Find voids/refunds
 saleSchema.index({ shopifySyncStatus: 1 }); // Find failed Shopify syncs
 saleSchema.index({ "items.type": 1, createdAt: -1 }); // Filter by catalog type
 saleSchema.index({ totalAmount: 1, createdAt: -1 }); // Revenue reports
+saleSchema.index({ deliveryStatus: 1, createdAt: -1 }); // Track delivery status
+// Note: deliveryFeeId already has index via field-level definition
 saleSchema.index(
   { organizationId: 1, idempotencyKey: 1 },
   { unique: true, sparse: true },
 );
+
+// Delivery category reporting indexes (NEW)
+saleSchema.index({ organizationId: 1, deliveryCategory: 1, createdAt: -1 }); // Sales by category time series
+saleSchema.index({ organizationId: 1, locationId: 1, deliveryCategory: 1, createdAt: -1 }); // Location-specific category breakdown
+saleSchema.index({ organizationId: 1, categoryStatus: 1, createdAt: -1 }); // Category status filtering
+saleSchema.index({
+  organizationId: 1,
+  deliveryCategory: 1,
+  categoryStatus: 1,
+  createdAt: -1,
+}); // Combined for delivery dashboard
+saleSchema.index({
+  organizationId: 1,
+  requiresDelivery: 1,
+  deliveryCategory: 1,
+}); // For filtering sales by delivery type in reports
 
 module.exports = mongoose.model("Sale", saleSchema);

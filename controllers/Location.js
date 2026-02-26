@@ -302,4 +302,624 @@ router.post("/:id/set-shopify-location", verifyToken, async (req, res) => {
   }
 });
 
+/**
+ * Update delivery fee settings for a location
+ * PATCH /locations/:id/delivery-settings
+ */
+router.patch("/:id/delivery-settings", verifyToken, async (req, res) => {
+  try {
+    const organizationId = req.user.organizationId;
+    const { id } = req.params;
+    const {
+      enableDeliveryFees,
+      taxDeliveryFees,
+      standardFee,
+      expressFee,
+      overnightFee,
+      defaultFeeType,
+      allowCustomFees,
+    } = req.body;
+
+    const location = await Location.findOne({ _id: id, organizationId });
+
+    if (!location) {
+      return res.status(404).json({ error: "Location not found" });
+    }
+
+    // Update delivery settings
+    if (enableDeliveryFees !== undefined)
+      location.deliveryFeeSettings.enableDeliveryFees = enableDeliveryFees;
+    if (taxDeliveryFees !== undefined)
+      location.deliveryFeeSettings.taxDeliveryFees = taxDeliveryFees;
+    if (standardFee !== undefined)
+      location.deliveryFeeSettings.standardFee = standardFee;
+    if (expressFee !== undefined)
+      location.deliveryFeeSettings.expressFee = expressFee;
+    if (overnightFee !== undefined)
+      location.deliveryFeeSettings.overnightFee = overnightFee;
+    if (defaultFeeType !== undefined)
+      location.deliveryFeeSettings.defaultFeeType = defaultFeeType;
+    if (allowCustomFees !== undefined)
+      location.deliveryFeeSettings.allowCustomFees = allowCustomFees;
+
+    await location.save();
+
+    await logTokenEvent(
+      req.user.userId,
+      organizationId,
+      "location_updated",
+      req.ip,
+      req.get("user-agent"),
+      {
+        details: `Delivery settings updated for location: ${location.name}`,
+      }
+    );
+
+    return res.json({
+      success: true,
+      message: "Delivery settings updated successfully",
+      deliveryFeeSettings: location.deliveryFeeSettings,
+    });
+  } catch (error) {
+    console.error("Update delivery settings error:", error);
+    return res.status(500).json({ error: "Failed to update delivery settings" });
+  }
+});
+
+/**
+ * Create delivery category for a location
+ * POST /locations/:id/delivery-categories
+ */
+router.post("/:id/delivery-categories", verifyToken, async (req, res) => {
+  try {
+    const organizationId = req.user.organizationId;
+    const { id } = req.params;
+    const {
+      categoryName,
+      description,
+      statusWorkflow,
+      childOptions,
+    } = req.body;
+
+    // Validate required fields
+    if (!categoryName) {
+      return res.status(400).json({
+        success: false,
+        message: "categoryName is required",
+      });
+    }
+
+    if (!statusWorkflow || !Array.isArray(statusWorkflow) || statusWorkflow.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "statusWorkflow is required and must be a non-empty array",
+      });
+    }
+
+    if (!childOptions || !Array.isArray(childOptions) || childOptions.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "childOptions is required and must be a non-empty array",
+      });
+    }
+
+    // Validate status workflow
+    for (let i = 0; i < statusWorkflow.length; i++) {
+      const wf = statusWorkflow[i];
+      if (!wf.status || !wf.displayName) {
+        return res.status(400).json({
+          success: false,
+          message: `Status workflow item at index ${i} must have 'status' and 'displayName'`,
+        });
+      }
+    }
+
+    // Validate child options
+    for (let i = 0; i < childOptions.length; i++) {
+      const opt = childOptions[i];
+      if (!opt.optionName || typeof opt.price !== "number" || opt.price < 0) {
+        return res.status(400).json({
+          success: false,
+          message: `Child option at index ${i} must have 'optionName' and 'price' (non-negative number)`,
+        });
+      }
+    }
+
+    const location = await Location.findOne({ _id: id, organizationId });
+
+    if (!location) {
+      return res.status(404).json({
+        success: false,
+        message: "Location not found or does not belong to this organization",
+      });
+    }
+
+    // Check if category already exists
+    const categoryExists = location.deliveryCategories?.some(
+      (cat) => cat.categoryName === categoryName
+    );
+
+    if (categoryExists) {
+      return res.status(400).json({
+        success: false,
+        message: `Delivery category "${categoryName}" already exists in this location`,
+      });
+    }
+
+    // Initialize deliveryCategories array if it doesn't exist
+    if (!location.deliveryCategories) {
+      location.deliveryCategories = [];
+    }
+
+    // Create new category with child options
+    const newCategory = {
+      _id: new (require("mongoose")).Types.ObjectId(),
+      categoryName,
+      description: description || "",
+      isActive: true,
+      statusWorkflow: statusWorkflow.map((wf, idx) => ({
+        status: wf.status,
+        displayName: wf.displayName,
+        order: wf.order || idx,
+      })),
+      childOptions: childOptions.map((opt) => ({
+        _id: new (require("mongoose")).Types.ObjectId(),
+        optionName: opt.optionName,
+        price: opt.price,
+        estimatedDays: opt.estimatedDays || 1,
+        isActive: opt.isActive !== undefined ? opt.isActive : true,
+      })),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    location.deliveryCategories.push(newCategory);
+    await location.save();
+
+    await logTokenEvent(
+      req.user.userId,
+      organizationId,
+      "delivery_category_created",
+      req.ip,
+      req.get("user-agent"),
+      {
+        details: `Delivery category "${categoryName}" created for location: ${location.name}`,
+      }
+    );
+
+    return res.status(201).json({
+      success: true,
+      message: "Delivery category created successfully",
+      category: newCategory,
+    });
+  } catch (error) {
+    console.error("Create delivery category error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to create delivery category",
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * Get all delivery categories for a location
+ * GET /locations/:id/delivery-categories
+ */
+router.get("/:id/delivery-categories", verifyToken, async (req, res) => {
+  try {
+    const organizationId = req.user.organizationId;
+    const { id } = req.params;
+    const { includeInactive = false } = req.query;
+
+    const location = await Location.findOne({ _id: id, organizationId });
+
+    if (!location) {
+      return res.status(404).json({
+        success: false,
+        message: "Location not found or does not belong to this organization",
+      });
+    }
+
+    let categories = location.deliveryCategories || [];
+
+    // Filter out inactive categories if requested
+    if (includeInactive !== "true") {
+      categories = categories.filter((cat) => cat.isActive);
+    }
+
+    return res.status(200).json({
+      success: true,
+      categories: categories,
+      total: categories.length,
+    });
+  } catch (error) {
+    console.error("Get delivery categories error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch delivery categories",
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * Update delivery category (name, description, status)
+ * PATCH /locations/:id/delivery-categories/:categoryId
+ */
+router.patch("/:id/delivery-categories/:categoryId", verifyToken, async (req, res) => {
+  try {
+    const organizationId = req.user.organizationId;
+    const { id, categoryId } = req.params;
+    const { categoryName, description, isActive, statusWorkflow } = req.body;
+
+    const location = await Location.findOne({ _id: id, organizationId });
+
+    if (!location) {
+      return res.status(404).json({
+        success: false,
+        message: "Location not found or does not belong to this organization",
+      });
+    }
+
+    const category = location.deliveryCategories?.find(
+      (cat) => cat._id.toString() === categoryId
+    );
+
+    if (!category) {
+      return res.status(404).json({
+        success: false,
+        message: "Delivery category not found",
+      });
+    }
+
+    // Update fields
+    if (categoryName !== undefined) category.categoryName = categoryName;
+    if (description !== undefined) category.description = description;
+    if (isActive !== undefined) category.isActive = isActive;
+    if (statusWorkflow !== undefined && Array.isArray(statusWorkflow)) {
+      // Validate workflow
+      for (let i = 0; i < statusWorkflow.length; i++) {
+        const wf = statusWorkflow[i];
+        if (!wf.status || !wf.displayName) {
+          return res.status(400).json({
+            success: false,
+            message: `Status workflow item at index ${i} must have 'status' and 'displayName'`,
+          });
+        }
+      }
+      category.statusWorkflow = statusWorkflow.map((wf, idx) => ({
+        status: wf.status,
+        displayName: wf.displayName,
+        order: wf.order || idx,
+      }));
+    }
+    category.updatedAt = new Date();
+
+    await location.save();
+
+    await logTokenEvent(
+      req.user.userId,
+      organizationId,
+      "delivery_category_updated",
+      req.ip,
+      req.get("user-agent"),
+      {
+        details: `Delivery category "${category.categoryName}" updated for location: ${location.name}`,
+      }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Delivery category updated successfully",
+      category: category,
+    });
+  } catch (error) {
+    console.error("Update delivery category error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update delivery category",
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * Delete delivery category
+ * DELETE /locations/:id/delivery-categories/:categoryId
+ */
+router.delete("/:id/delivery-categories/:categoryId", verifyToken, async (req, res) => {
+  try {
+    const organizationId = req.user.organizationId;
+    const { id, categoryId } = req.params;
+
+    const location = await Location.findOne({ _id: id, organizationId });
+
+    if (!location) {
+      return res.status(404).json({
+        success: false,
+        message: "Location not found or does not belong to this organization",
+      });
+    }
+
+    const categoryIndex = location.deliveryCategories?.findIndex(
+      (cat) => cat._id.toString() === categoryId
+    );
+
+    if (categoryIndex === -1) {
+      return res.status(404).json({
+        success: false,
+        message: "Delivery category not found",
+      });
+    }
+
+    const deletedCategory = location.deliveryCategories[categoryIndex];
+    location.deliveryCategories.splice(categoryIndex, 1);
+    await location.save();
+
+    await logTokenEvent(
+      req.user.userId,
+      organizationId,
+      "delivery_category_deleted",
+      req.ip,
+      req.get("user-agent"),
+      {
+        details: `Delivery category "${deletedCategory.categoryName}" deleted from location: ${location.name}`,
+      }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Delivery category deleted successfully",
+    });
+  } catch (error) {
+    console.error("Delete delivery category error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to delete delivery category",
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * Add or update delivery option in a category
+ * POST /locations/:id/delivery-categories/:categoryId/options
+ */
+router.post("/:id/delivery-categories/:categoryId/options", verifyToken, async (req, res) => {
+  try {
+    const organizationId = req.user.organizationId;
+    const { id, categoryId } = req.params;
+    const { optionName, price, estimatedDays, isActive } = req.body;
+
+    // Validate required fields
+    if (!optionName || typeof price !== "number" || price < 0) {
+      return res.status(400).json({
+        success: false,
+        message: "optionName and price (non-negative number) are required",
+      });
+    }
+
+    const location = await Location.findOne({ _id: id, organizationId });
+
+    if (!location) {
+      return res.status(404).json({
+        success: false,
+        message: "Location not found or does not belong to this organization",
+      });
+    }
+
+    const category = location.deliveryCategories?.find(
+      (cat) => cat._id.toString() === categoryId
+    );
+
+    if (!category) {
+      return res.status(404).json({
+        success: false,
+        message: "Delivery category not found",
+      });
+    }
+
+    // Check if option already exists
+    const optionExists = category.childOptions?.some(
+      (opt) => opt.optionName === optionName
+    );
+
+    if (optionExists) {
+      return res.status(400).json({
+        success: false,
+        message: `Option "${optionName}" already exists in this category`,
+      });
+    }
+
+    // Initialize childOptions array if it doesn't exist
+    if (!category.childOptions) {
+      category.childOptions = [];
+    }
+
+    // Create new option
+    const newOption = {
+      _id: new (require("mongoose")).Types.ObjectId(),
+      optionName,
+      price,
+      estimatedDays: estimatedDays || 1,
+      isActive: isActive !== undefined ? isActive : true,
+    };
+
+    category.childOptions.push(newOption);
+    category.updatedAt = new Date();
+    await location.save();
+
+    await logTokenEvent(
+      req.user.userId,
+      organizationId,
+      "delivery_option_created",
+      req.ip,
+      req.get("user-agent"),
+      {
+        details: `Delivery option "${optionName}" added to category "${category.categoryName}" in location: ${location.name}`,
+      }
+    );
+
+    return res.status(201).json({
+      success: true,
+      message: "Delivery option added successfully",
+      option: newOption,
+    });
+  } catch (error) {
+    console.error("Add delivery option error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to add delivery option",
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * Update delivery option price and details
+ * PATCH /locations/:id/delivery-categories/:categoryId/options/:optionId
+ */
+router.patch("/:id/delivery-categories/:categoryId/options/:optionId", verifyToken, async (req, res) => {
+  try {
+    const organizationId = req.user.organizationId;
+    const { id, categoryId, optionId } = req.params;
+    const { optionName, price, estimatedDays, isActive } = req.body;
+
+    const location = await Location.findOne({ _id: id, organizationId });
+
+    if (!location) {
+      return res.status(404).json({
+        success: false,
+        message: "Location not found or does not belong to this organization",
+      });
+    }
+
+    const category = location.deliveryCategories?.find(
+      (cat) => cat._id.toString() === categoryId
+    );
+
+    if (!category) {
+      return res.status(404).json({
+        success: false,
+        message: "Delivery category not found",
+      });
+    }
+
+    const option = category.childOptions?.find(
+      (opt) => opt._id.toString() === optionId
+    );
+
+    if (!option) {
+      return res.status(404).json({
+        success: false,
+        message: "Delivery option not found",
+      });
+    }
+
+    // Update fields
+    if (optionName !== undefined) option.optionName = optionName;
+    if (typeof price === "number" && price >= 0) option.price = price;
+    if (estimatedDays !== undefined) option.estimatedDays = estimatedDays;
+    if (isActive !== undefined) option.isActive = isActive;
+    category.updatedAt = new Date();
+
+    await location.save();
+
+    await logTokenEvent(
+      req.user.userId,
+      organizationId,
+      "delivery_option_updated",
+      req.ip,
+      req.get("user-agent"),
+      {
+        details: `Delivery option "${option.optionName}" updated in category "${category.categoryName}" in location: ${location.name}`,
+      }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Delivery option updated successfully",
+      option: option,
+    });
+  } catch (error) {
+    console.error("Update delivery option error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update delivery option",
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * Delete delivery option from category
+ * DELETE /locations/:id/delivery-categories/:categoryId/options/:optionId
+ */
+router.delete("/:id/delivery-categories/:categoryId/options/:optionId", verifyToken, async (req, res) => {
+  try {
+    const organizationId = req.user.organizationId;
+    const { id, categoryId, optionId } = req.params;
+
+    const location = await Location.findOne({ _id: id, organizationId });
+
+    if (!location) {
+      return res.status(404).json({
+        success: false,
+        message: "Location not found or does not belong to this organization",
+      });
+    }
+
+    const category = location.deliveryCategories?.find(
+      (cat) => cat._id.toString() === categoryId
+    );
+
+    if (!category) {
+      return res.status(404).json({
+        success: false,
+        message: "Delivery category not found",
+      });
+    }
+
+    const optionIndex = category.childOptions?.findIndex(
+      (opt) => opt._id.toString() === optionId
+    );
+
+    if (optionIndex === -1) {
+      return res.status(404).json({
+        success: false,
+        message: "Delivery option not found",
+      });
+    }
+
+    const deletedOption = category.childOptions[optionIndex];
+    category.childOptions.splice(optionIndex, 1);
+    category.updatedAt = new Date();
+    await location.save();
+
+    await logTokenEvent(
+      req.user.userId,
+      organizationId,
+      "delivery_option_deleted",
+      req.ip,
+      req.get("user-agent"),
+      {
+        details: `Delivery option "${deletedOption.optionName}" deleted from category "${category.categoryName}" in location: ${location.name}`,
+      }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Delivery option deleted successfully",
+    });
+  } catch (error) {
+    console.error("Delete delivery option error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to delete delivery option",
+      error: error.message,
+    });
+  }
+});
+
 module.exports = router;

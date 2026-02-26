@@ -7,7 +7,7 @@ const Organization = require("../models/Organization");
 const UserOrganization = require("../models/UserOrganization");
 const Invitation = require("../models/Invitation");
 const User = require("../models/User");
-const { getPermissionsForRole } = require("../config/permissions");
+const { getPermissionsForRole, PERMISSIONS } = require("../config/permissions");
 const { verifyToken, requireOrganization } = require("../middleware/auth");
 const { logTokenEvent } = require("../services/auditLogger");
 const { sendOrganizationInvitation } = require("../services/emailNotifier");
@@ -105,15 +105,19 @@ router.post("/:organizationId/invite", verifyToken, async (req, res) => {
       return res.status(400).json({ error: "Email is required" });
     }
 
-    // Verify user is owner/manager
+    // Verify user has permission to invite (Owner/Manager or MANAGE_USERS permission)
     const membership = await UserOrganization.findOne({
       userId: req.user.userId,
       organizationId: req.params.organizationId,
     }).lean();
 
-    if (!membership || !["Owner", "Manager"].includes(membership.role)) {
+    const hasPermission = membership && 
+      (["Owner", "Manager"].includes(membership.role) || 
+       membership.permissions?.includes(PERMISSIONS.MANAGE_USERS));
+
+    if (!hasPermission) {
       return res.status(403).json({
-        error: "Only Owner or Manager can invite users",
+        error: "You don't have permission to invite users",
       });
     }
 
@@ -223,6 +227,227 @@ router.post("/:organizationId/invite", verifyToken, async (req, res) => {
     return res.status(500).json({ error: "Failed to send invitation" });
   }
 });
+
+/**
+ * Get organization invitations
+ * GET /organizations/:organizationId/invitations
+ */
+router.get("/:organizationId/invitations", verifyToken, async (req, res) => {
+  try {
+    const { status } = req.query;
+
+    // Verify user has permission
+    const membership = await UserOrganization.findOne({
+      userId: req.user.userId,
+      organizationId: req.params.organizationId,
+    }).lean();
+
+    const hasPermission = membership && 
+      (["Owner", "Manager"].includes(membership.role) || 
+       membership.permissions?.includes(PERMISSIONS.MANAGE_USERS));
+
+    if (!hasPermission) {
+      return res.status(403).json({
+        error: "You don't have permission to view invitations",
+      });
+    }
+
+    // Build query
+    const query = { organizationId: req.params.organizationId };
+
+    // Handle status filter
+    if (status && status !== "all") {
+      if (status === "expired") {
+        // Get pending invitations that have expired
+        query.status = "pending";
+        query.expiresAt = { $lt: new Date() };
+      } else {
+        query.status = status;
+      }
+    }
+
+    // Fetch invitations
+    const invitations = await Invitation.find(query)
+      .populate("invitedBy", "fullname email")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return res.status(200).json({
+      invitations,
+    });
+  } catch (error) {
+    console.error("Error fetching invitations:", error);
+    return res.status(500).json({ error: "Failed to fetch invitations" });
+  }
+});
+
+/**
+ * Revoke an invitation
+ * DELETE /organizations/:organizationId/invitations/:invitationId
+ */
+router.delete(
+  "/:organizationId/invitations/:invitationId",
+  verifyToken,
+  async (req, res) => {
+    try {
+      const mongoose = require("mongoose");
+
+      // Validate invitationId format
+      if (!mongoose.isValidObjectId(req.params.invitationId)) {
+        return res.status(400).json({ error: "Invalid invitation ID" });
+      }
+
+      // Verify user has permission
+      const membership = await UserOrganization.findOne({
+        userId: req.user.userId,
+        organizationId: req.params.organizationId,
+      }).lean();
+
+      const hasPermission = membership && 
+        (["Owner", "Manager"].includes(membership.role) || 
+         membership.permissions?.includes(PERMISSIONS.MANAGE_USERS));
+
+      if (!hasPermission) {
+        return res.status(403).json({
+          error: "You don't have permission to revoke invitations",
+        });
+      }
+
+      // Find invitation
+      const invitation = await Invitation.findOne({
+        _id: req.params.invitationId,
+        organizationId: req.params.organizationId,
+      });
+
+      if (!invitation) {
+        return res.status(404).json({ error: "Invitation not found" });
+      }
+
+      // Can only revoke pending invitations
+      if (invitation.status !== "pending") {
+        return res.status(400).json({
+          error: `Cannot revoke ${invitation.status} invitation`,
+        });
+      }
+
+      // Update status to revoked
+      invitation.status = "revoked";
+      await invitation.save();
+
+      // Log audit event
+      await logTokenEvent(
+        req.user.userId,
+        req.params.organizationId,
+        "invitation_revoked",
+        req.ip,
+        req.get("user-agent"),
+        {
+          details: `Revoked invitation for ${invitation.email} with role ${invitation.role}`,
+        },
+      );
+
+      return res.status(200).json({
+        message: "Invitation revoked successfully",
+        invitation,
+      });
+    } catch (error) {
+      console.error("Error revoking invitation:", error);
+      return res.status(500).json({ error: "Failed to revoke invitation" });
+    }
+  },
+);
+
+/**
+ * Resend an invitation
+ * POST /organizations/:organizationId/invitations/:invitationId/resend
+ */
+router.post(
+  "/:organizationId/invitations/:invitationId/resend",
+  verifyToken,
+  async (req, res) => {
+    try {
+      const mongoose = require("mongoose");
+
+      // Validate invitationId format
+      if (!mongoose.isValidObjectId(req.params.invitationId)) {
+        return res.status(400).json({ error: "Invalid invitation ID" });
+      }
+
+      // Verify user has permission
+      const membership = await UserOrganization.findOne({
+        userId: req.user.userId,
+        organizationId: req.params.organizationId,
+      }).lean();
+
+      const hasPermission = membership && 
+        (["Owner", "Manager"].includes(membership.role) || 
+         membership.permissions?.includes(PERMISSIONS.MANAGE_USERS));
+
+      if (!hasPermission) {
+        return res.status(403).json({
+          error: "You don't have permission to resend invitations",
+        });
+      }
+
+      // Find invitation
+      const invitation = await Invitation.findOne({
+        _id: req.params.invitationId,
+        organizationId: req.params.organizationId,
+      });
+
+      if (!invitation) {
+        return res.status(404).json({ error: "Invitation not found" });
+      }
+
+      // Can only resend pending invitations
+      if (invitation.status !== "pending") {
+        return res.status(400).json({
+          error: `Cannot resend ${invitation.status} invitation`,
+        });
+      }
+
+      // Extend expiry by 7 days
+      const newExpiresAt = new Date();
+      newExpiresAt.setDate(newExpiresAt.getDate() + 7);
+      invitation.expiresAt = newExpiresAt;
+      await invitation.save();
+
+      // Get organization and inviter details
+      const org = await Organization.findById(req.params.organizationId);
+      const inviter = await User.findById(invitation.invitedBy).lean();
+
+      // Send invitation email
+      const invitationUrl = `${process.env.CLIENT_URL}/auth/signup?invitation=${encodeURIComponent(invitation.token)}`;
+      await sendOrganizationInvitation(
+        invitation.email,
+        inviter?.fullname || "Team member",
+        org.name,
+        invitation.role,
+        invitationUrl,
+      );
+
+      // Log audit event
+      await logTokenEvent(
+        req.user.userId,
+        req.params.organizationId,
+        "invitation_resent",
+        req.ip,
+        req.get("user-agent"),
+        {
+          details: `Resent invitation to ${invitation.email}`,
+        },
+      );
+
+      return res.status(200).json({
+        message: "Invitation resent successfully",
+        invitation,
+      });
+    } catch (error) {
+      console.error("Error resending invitation:", error);
+      return res.status(500).json({ error: "Failed to resend invitation" });
+    }
+  },
+);
 
 /**
  * Get organization members

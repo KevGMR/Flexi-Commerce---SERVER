@@ -50,6 +50,86 @@ const locationSchema = new Schema(
       enum: ["active", "inactive"],
       default: "active",
     },
+    // Delivery fee settings (legacy - kept for backward compatibility)
+    deliveryFeeSettings: {
+      enableDeliveryFees: {
+        type: Boolean,
+        default: true,
+      },
+      taxDeliveryFees: {
+        type: Boolean,
+        default: true, // Use location tax rate for delivery fees
+      },
+      standardFee: {
+        type: Number,
+        default: 5.0,
+        min: 0,
+      },
+      expressFee: {
+        type: Number,
+        default: 10.0,
+        min: 0,
+      },
+      overnightFee: {
+        type: Number,
+        default: 15.0,
+        min: 0,
+      },
+      defaultFeeType: {
+        type: String,
+        enum: ["standard", "express", "overnight", "custom"],
+        default: "standard",
+      },
+      allowCustomFees: {
+        type: Boolean,
+        default: true,
+      },
+    },
+    // Delivery categories (customizable per organization)
+    deliveryCategories: [
+      {
+        _id: Schema.Types.ObjectId,
+        categoryName: {
+          type: String,
+          required: true,
+        },
+        description: String,
+        isActive: {
+          type: Boolean,
+          default: true,
+        },
+        // Custom status workflow for this category
+        statusWorkflow: [
+          {
+            status: String,
+            displayName: String,
+            order: Number,
+          },
+        ],
+        // Child options under this category
+        childOptions: [
+          {
+            _id: Schema.Types.ObjectId,
+            optionName: {
+              type: String,
+              required: true,
+            },
+            price: {
+              type: Number,
+              required: true,
+              min: 0,
+            },
+            estimatedDays: Number,
+            isActive: {
+              type: Boolean,
+              default: true,
+            },
+          },
+        ],
+        createdAt: Date,
+        updatedAt: Date,
+      },
+    ],
     // Metafield definitions for this location (overrides org-level)
     metafieldDefinitions: [
       {

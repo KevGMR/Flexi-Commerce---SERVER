@@ -28,6 +28,8 @@ const transferRouter = require("./controllers/Transfer");
 const giftCardRouter = require("./controllers/GiftCard");
 const shopifyRouter = require("./controllers/ShopifyController");
 const salesRouter = require("./controllers/Sales");
+const deliveryFeeRouter = require("./controllers/DeliveryFee");
+const driverRouter = require("./controllers/Driver");
 
 const { verifyToken } = require("./middleware/auth");
 const { checkUserStatus } = require("./middleware/userStatusCheck");
@@ -36,6 +38,8 @@ const { apiLimiter } = require("./middleware/rateLimiter");
 const { handleErrors } = require("./middleware/auth");
 const { PERMISSIONS } = require("./config/permissions");
 const shopifyRetryWorker = require("./workers/shopifyRetryWorker");
+const { startDeliveryStatusSync } = require("./workers/syncDeliveryStatus");
+const { startLinkOfflineDeliveriesToSales } = require("./workers/linkOfflineDeliveriesToSales");
 
 const app = express();
 const port = process.env.PORT || 9200;
@@ -83,6 +87,8 @@ mongoose
       
       // Start background workers
       shopifyRetryWorker.start();
+      startDeliveryStatusSync();
+      startLinkOfflineDeliveriesToSales();
     });
   })
   .catch((err) => console.log({ databaseConnect: err }));
@@ -127,6 +133,12 @@ app.use("/shopify", verifyToken, checkUserStatus, shopifyRouter);
 
 // POS Routes (Protected)
 app.use("/sales", verifyToken, checkUserStatus, salesRouter);
+
+// Delivery Fee Routes (Protected)
+app.use("/delivery-fees", verifyToken, checkUserStatus, deliveryFeeRouter);
+
+// Driver Routes (Protected)
+app.use("/drivers", verifyToken, checkUserStatus, driverRouter);
 
 // 404 Handler
 app.use((req, res) => {

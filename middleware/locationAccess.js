@@ -58,4 +58,33 @@ const validateLocationAccess = async (req, res, next) => {
   }
 };
 
-module.exports = { validateLocationAccess };
+/**
+ * Utility function to get user's accessible location IDs
+ * Returns array of locationIds, or null if user has access to all locations
+ */
+const getUserAccessibleLocations = async (userId, organizationId, role) => {
+  // Bypass check for Owner and Manager - they have access to all locations
+  if (["Owner", "Manager"].includes(role)) {
+    return null; // null means all locations
+  }
+
+  // Get user's organization membership
+  const membership = await UserOrganization.findOne({
+    userId,
+    organizationId,
+    status: "active",
+  }).select("locations").lean();
+
+  if (!membership) {
+    return []; // No access to any location
+  }
+
+  // If locations array is empty, user has access to all locations
+  if (!membership.locations || membership.locations.length === 0) {
+    return null; // null means all locations
+  }
+
+  return membership.locations; // Return specific locations (array of IDs)
+};
+
+module.exports = { validateLocationAccess, getUserAccessibleLocations };

@@ -1,6 +1,7 @@
 const ShopifyConnection = require('../models/ShopifyConnection');
 const ShopifySyncLog = require('../models/ShopifySyncLog');
 const ShopifySyncQueue = require('../models/ShopifySyncQueue');
+const Location = require('../models/Location');
 const { getAccessToken, clearTokenCache } = require('../data/shopifyAuth');
 const crypto = require('crypto');
 const axios = require('axios');
@@ -472,6 +473,7 @@ const getConnection = async (req, res) => {
 const getProducts = async (req, res) => {
   try {
     const { organizationId } = req.user;
+    const selectedLocationId = req.headers['x-location-id'] || req.query.locationId;
 
     const connection = await ShopifyConnection.findOne({ organizationId })
       .select('+clientId +clientSecret +accessToken +tokenExpiresAt');
@@ -511,6 +513,20 @@ const getProducts = async (req, res) => {
                     inventoryQuantity
                     inventoryItem {
                       id
+                      inventoryLevels(first: 100) {
+                        edges {
+                          node {
+                            location {
+                              id
+                              name
+                            }
+                            quantities(names: ["available"]) {
+                              name
+                              quantity
+                            }
+                          }
+                        }
+                      }
                     }
                   }
                 }
@@ -533,7 +549,8 @@ const getProducts = async (req, res) => {
     const allProducts = [];
     let hasNextPage = true;
     let cursor = null;
-    const pageSize = 50;
+    const scopedPageSize = selectedLocationId ? 25 : 50;
+    let pageSize = scopedPageSize;
     let pageCount = 0;
 
     while (hasNextPage) {
@@ -545,6 +562,19 @@ const getProducts = async (req, res) => {
       const result = await graphql(query, variables);
 
       if (result.errors) {
+        const maxCostExceeded = result.errors.some((error) => error?.extensions?.code === 'MAX_COST_EXCEEDED');
+
+        if (maxCostExceeded) {
+          const previousPageSize = pageSize;
+          pageSize = Math.max(5, Math.floor(pageSize / 2));
+
+          if (pageSize < previousPageSize) {
+            console.warn(`[Shopify] MAX_COST_EXCEEDED on page ${pageCount + 1}. Reducing page size from ${previousPageSize} to ${pageSize} and retrying.`);
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+            continue;
+          }
+        }
+
         return res.status(500).json({
           success: false,
           message: 'Shopify GraphQL errors',
@@ -562,6 +592,128 @@ const getProducts = async (req, res) => {
       console.log(`[Shopify] Fetched page ${pageCount} (${products.length} products, total: ${allProducts.length})`);
     }
 
+    const normalizeShopifyLocation = (value) => {
+      if (!value) {
+        return { gid: null, numeric: null };
+      }
+      const raw = String(value);
+      const numeric = raw.replace(/[^0-9]/g, '');
+      const gid = raw.startsWith('gid://')
+        ? raw
+        : numeric
+          ? `gid://shopify/Location/${numeric}`
+          : raw;
+      return { gid, numeric };
+    };
+
+    const getMatchedInventoryLevel = (inventoryLevels = [], shopifyLocationId) => {
+      if (!shopifyLocationId) return null;
+
+      const target = normalizeShopifyLocation(shopifyLocationId);
+
+      return inventoryLevels.find((levelEdge) => {
+        const levelLocationId = levelEdge?.node?.location?.id;
+        if (!levelLocationId) return false;
+
+        const candidate = normalizeShopifyLocation(levelLocationId);
+        if (candidate.gid && target.gid && candidate.gid === target.gid) {
+          return true;
+        }
+        return Boolean(candidate.numeric && target.numeric && candidate.numeric === target.numeric);
+      }) || null;
+    };
+
+    let scopedProducts = allProducts;
+    let locationScope = {
+      scoped: false,
+      flexiLocationId: selectedLocationId || null,
+      shopifyLocationId: null,
+      shopifyLocationName: null,
+      hasMapping: true,
+    };
+
+    if (selectedLocationId) {
+      const flexiLocation = await Location.findOne({
+        _id: selectedLocationId,
+        organizationId,
+      }).lean();
+
+      if (!flexiLocation) {
+        return res.status(403).json({
+          success: false,
+          message: 'Selected location is invalid for this organization',
+        });
+      }
+
+      if (!flexiLocation.shopifyLocationId) {
+        scopedProducts = [];
+        locationScope = {
+          scoped: true,
+          flexiLocationId: selectedLocationId,
+          shopifyLocationId: null,
+          shopifyLocationName: null,
+          hasMapping: false,
+        };
+      } else {
+        scopedProducts = allProducts
+          .map((product) => {
+            const scopedVariants = (product?.variants?.edges || [])
+              .map((variantEdge) => {
+                const inventoryLevels = variantEdge?.node?.inventoryItem?.inventoryLevels?.edges || [];
+                const matchedLevel = getMatchedInventoryLevel(
+                  inventoryLevels,
+                  flexiLocation.shopifyLocationId
+                );
+
+                if (!matchedLevel) {
+                  return null;
+                }
+
+                const availableQuantity = matchedLevel.node.quantities?.[0]?.quantity;
+
+                return {
+                  ...variantEdge,
+                  node: {
+                    ...variantEdge.node,
+                    inventoryQuantity:
+                      typeof availableQuantity === 'number'
+                        ? availableQuantity
+                        : variantEdge.node.inventoryQuantity,
+                  },
+                };
+              })
+              .filter(Boolean);
+
+            if (scopedVariants.length === 0) {
+              return null;
+            }
+
+            const scopedTotalInventory = scopedVariants.reduce((sum, variantEdge) => {
+              const inventoryQty = Number(variantEdge?.node?.inventoryQuantity || 0);
+              return sum + inventoryQty;
+            }, 0);
+
+            return {
+              ...product,
+              totalInventory: scopedTotalInventory,
+              variants: {
+                ...product.variants,
+                edges: scopedVariants,
+              },
+            };
+          })
+          .filter(Boolean);
+
+        locationScope = {
+          scoped: true,
+          flexiLocationId: selectedLocationId,
+          shopifyLocationId: flexiLocation.shopifyLocationId,
+          shopifyLocationName: flexiLocation.shopifyLocationName || null,
+          hasMapping: true,
+        };
+      }
+    }
+
     // Update last synced timestamp
     connection.lastSyncedAt = new Date();
     await connection.save();
@@ -569,9 +721,10 @@ const getProducts = async (req, res) => {
     res.json({
       success: true,
       data: {
-        products: allProducts,
-        totalCount: allProducts.length,
+        products: scopedProducts,
+        totalCount: scopedProducts.length,
         pagesFetched: pageCount,
+        locationScope,
         lastFetchedAt: new Date().toISOString(),
       },
     });

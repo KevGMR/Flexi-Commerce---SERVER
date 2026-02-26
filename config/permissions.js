@@ -69,6 +69,14 @@ const PERMISSIONS = {
   // System Administration
   MANAGE_SETTINGS: "manage_settings",
   VIEW_SETTINGS: "view_settings",
+
+  // Delivery Fee Permissions
+  DELIVERY_FEES_CREATE: "delivery_fees.create",
+  DELIVERY_FEES_READ: "delivery_fees.read",
+  DELIVERY_FEES_UPDATE: "delivery_fees.update",
+  DELIVERY_FEES_DELETE: "delivery_fees.delete",
+  DELIVERY_FEES_ASSIGN_DRIVER: "delivery_fees.assign_driver",
+  DELIVERY_FEES_UPDATE_STATUS: "delivery_fees.update_status",
 };
 
 // Critical permissions that require immediate database check
@@ -141,6 +149,14 @@ const ROLE_PERMISSIONS = {
     PERMISSIONS.CREATE_USER,
     PERMISSIONS.EDIT_USER,
     
+    // Delivery Fees
+    PERMISSIONS.DELIVERY_FEES_CREATE,
+    PERMISSIONS.DELIVERY_FEES_READ,
+    PERMISSIONS.DELIVERY_FEES_UPDATE,
+    PERMISSIONS.DELIVERY_FEES_DELETE,
+    PERMISSIONS.DELIVERY_FEES_ASSIGN_DRIVER,
+    PERMISSIONS.DELIVERY_FEES_UPDATE_STATUS,
+    
     // Settings
     PERMISSIONS.VIEW_SETTINGS,
   ],
@@ -169,12 +185,20 @@ const ROLE_PERMISSIONS = {
     
     // Quick Items
     PERMISSIONS.VIEW_QUICK_ITEMS,
+    
+    // Delivery Fees (limited)
+    PERMISSIONS.DELIVERY_FEES_CREATE,
+    PERMISSIONS.DELIVERY_FEES_READ,
   ],
   
   Employee: [
     // Minimal permissions
     PERMISSIONS.VIEW_PRODUCT,
     PERMISSIONS.VIEW_INVENTORY,
+    
+    // Delivery Fees (view only for potential driver role)
+    PERMISSIONS.DELIVERY_FEES_READ,
+    PERMISSIONS.DELIVERY_FEES_UPDATE_STATUS,
   ],
 };
 
@@ -214,6 +238,14 @@ const PERMISSION_GROUPS = {
     PERMISSIONS.MANAGE_ROLES,
     PERMISSIONS.MANAGE_AUDIT_LOGS,
     PERMISSIONS.MANAGE_SETTINGS,
+  ],
+  deliveryFees: [
+    PERMISSIONS.DELIVERY_FEES_CREATE,
+    PERMISSIONS.DELIVERY_FEES_READ,
+    PERMISSIONS.DELIVERY_FEES_UPDATE,
+    PERMISSIONS.DELIVERY_FEES_DELETE,
+    PERMISSIONS.DELIVERY_FEES_ASSIGN_DRIVER,
+    PERMISSIONS.DELIVERY_FEES_UPDATE_STATUS,
   ],
 };
 

@@ -28,8 +28,8 @@ Key topics:
 **Key Endpoints:**
 - `POST /users/new` - Register user
 - `GET /organizations/my` - Get my organizations
-- `POST /organizations/:id/switch` - Switch organization
-- `POST /auth/refresh` - Refresh access token
+- `POST /users/switch-organization` - Switch organization
+- `POST /users/refresh` - Refresh access token
 - `POST /users/logout` - Logout
 
 ---
@@ -222,8 +222,11 @@ Authorization: Bearer {{accessToken}}
 ### 4. Refresh Token (Before Expiry)
 
 ```
-POST /auth/refresh
-{ "refreshToken": "refresh-token" }
+POST /users/refresh
+Headers:
+  X-Device-ID: <device-id>
+Cookie:
+  refreshToken=<httpOnly-cookie>
 ↓
 Returns: new accessToken
 Update: {{accessToken}}
@@ -243,9 +246,9 @@ Update: {{accessToken}}
 | GET | `/organizations/:id` | Get org details |
 | POST | `/organizations` | Create new organization |
 | PUT | `/organizations/:id` | Update org settings |
-| POST | `/organizations/:id/switch` | Switch organization |
-| POST | `/auth/refresh` | Refresh access token |
-| POST | `/auth/logout` | Logout |
+| POST | `/users/switch-organization` | Switch organization |
+| POST | `/users/refresh` | Refresh access token |
+| POST | `/users/logout` | Logout |
 
 ### Users & Roles
 | Method | Endpoint | Purpose |

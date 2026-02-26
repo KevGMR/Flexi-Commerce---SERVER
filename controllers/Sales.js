@@ -3,6 +3,8 @@ const router = express.Router();
 const Sale = require("../models/Sale");
 const Location = require("../models/Location");
 const Product = require("../models/Product");
+const DeliveryFee = require("../models/DeliveryFee");
+const Receivable = require("../models/Receivable");
 const ShopifyConnection = require("../models/ShopifyConnection");
 const UserOrganization = require("../models/UserOrganization");
 const {
@@ -12,6 +14,62 @@ const {
 const Inventory = require("../models/Inventory");
 const { requirePermission } = require("../middleware/permissionCheck");
 const { validateLocationAccess } = require("../middleware/locationAccess");
+
+const roundMoney = (value) => Math.round((Number(value) || 0) * 100) / 100;
+
+const deriveSalePaymentStatus = (payments = [], totalAmount = 0) => {
+  const total = roundMoney(totalAmount);
+  const completedTotal = roundMoney(
+    payments
+      .filter((p) => (p.status || "completed") === "completed")
+      .reduce((sum, p) => sum + (Number(p.amount) || 0), 0),
+  );
+
+  if (total <= 0 || completedTotal >= total - 0.01) {
+    return "completed";
+  }
+
+  if (completedTotal > 0) {
+    return "partial";
+  }
+
+  if (payments.some((p) => (p.status || "completed") === "pending")) {
+    return "pending";
+  }
+
+  if (payments.some((p) => (p.status || "completed") === "failed")) {
+    return "failed";
+  }
+
+  return "pending";
+};
+
+const getCompletedPaymentsTotal = (payments = []) =>
+  roundMoney(
+    payments
+      .filter((p) => (p.status || "completed") === "completed")
+      .reduce((sum, p) => sum + (Number(p.amount) || 0), 0),
+  );
+
+const userHasLocationAccess = async ({ organizationId, userId, role, locationId }) => {
+  if (["Owner", "Manager"].includes(role)) {
+    return true;
+  }
+
+  const membership = await UserOrganization.findOne({
+    userId,
+    organizationId,
+    status: "active",
+  })
+    .select("locations")
+    .lean();
+
+  if (!membership || !membership.locations || membership.locations.length === 0) {
+    return true;
+  }
+
+  return membership.locations.some((loc) => String(loc) === String(locationId));
+};
 
 /**
  * POST /sales
@@ -33,6 +91,7 @@ const createSale = async (req, res) => {
       paymentStatus,
       notes,
       tags,
+      deliveryInfo,
     } = req.body;
 
     
@@ -87,6 +146,8 @@ const createSale = async (req, res) => {
       });
     }
 
+    const taxRate = Number(location.taxRate) || 0;
+
     // Calculate totals
     let subtotal = 0;
     let totalTax = 0;
@@ -110,7 +171,9 @@ const createSale = async (req, res) => {
 
         const lineTotal = item.quantity * item.unitPrice;
         const lineDiscount = item.discount || 0;
-        const lineTax = item.taxAmount || 0;
+        const taxableAmount = Math.max(0, lineTotal - lineDiscount);
+        const lineTax =
+          taxRate > 0 ? taxableAmount - taxableAmount / (1 + taxRate) : 0;
 
         enrichedItems.push({
           type: "flexi",
@@ -139,7 +202,9 @@ const createSale = async (req, res) => {
 
         const lineTotal = item.quantity * item.unitPrice;
         const lineDiscount = item.discount || 0;
-        const lineTax = item.taxAmount || 0;
+        const taxableAmount = Math.max(0, lineTotal - lineDiscount);
+        const lineTax =
+          taxRate > 0 ? taxableAmount - taxableAmount / (1 + taxRate) : 0;
 
         enrichedItems.push({
           type: "shopify",
@@ -164,17 +229,206 @@ const createSale = async (req, res) => {
       }
     }
 
-    const totalAmount = subtotal + totalTax - totalDiscount;
+    let totalAmount = subtotal - totalDiscount;
+
+    // Handle delivery fee if provided
+    let deliveryFee = null;
+    let deliveryFeeAmount = 0;
+    
+    if (deliveryInfo) {
+      console.log("📦 Processing delivery info:", {
+        requiresDelivery: deliveryInfo.requiresDelivery,
+        hasRecipientName: !!deliveryInfo.recipientName,
+        hasRecipientPhone: !!deliveryInfo.recipientPhone,
+        hasDeliveryAddress: !!deliveryInfo.deliveryAddress,
+        hasFeeType: !!deliveryInfo.feeType,
+        hasCategory: !!deliveryInfo.deliveryCategory,
+        hasOption: !!deliveryInfo.deliveryOption,
+      });
+    } else {
+      console.log("ℹ️ No deliveryInfo provided in request");
+    }
+    
+    if (deliveryInfo && deliveryInfo.requiresDelivery) {
+      // Validate required delivery info
+      const missingFields = [];
+      if (!deliveryInfo.recipientName) missingFields.push("recipientName");
+      if (!deliveryInfo.recipientPhone) missingFields.push("recipientPhone");
+      if (!deliveryInfo.deliveryAddress) missingFields.push("deliveryAddress");
+
+      if (missingFields.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: `Delivery requires: ${missingFields.join(", ")}`,
+        });
+      }
+
+      // Validate delivery address contains minimum required fields (street and city)
+      // Country will default to "Kenya" if not provided
+      const addressMissingFields = [];
+      if (!deliveryInfo.deliveryAddress.street) addressMissingFields.push("street");
+      if (!deliveryInfo.deliveryAddress.city) addressMissingFields.push("city");
+
+      if (addressMissingFields.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: `Delivery address must include: ${addressMissingFields.join(", ")}`,
+        });
+      }
+
+      // Check if using new category-based system or legacy feeType
+      const usingCategory = !!(deliveryInfo.deliveryCategory && deliveryInfo.deliveryOption);
+      const usingLegacyFeeType = !!deliveryInfo.feeType;
+
+      // Validate that at least one fee type is provided
+      if (!usingCategory && !usingLegacyFeeType) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Either feeType (legacy) or both deliveryCategory and deliveryOption are required",
+        });
+      }
+
+      let amount = 0;
+      let categoryStatus = undefined;
+      let deliveryCategory = undefined;
+      let deliveryOption = undefined;
+      let feeType = undefined;
+
+      if (usingCategory) {
+        // New category-based delivery fee
+        deliveryCategory = deliveryInfo.deliveryCategory;
+        deliveryOption = deliveryInfo.deliveryOption;
+
+        // Find category in location
+        const category = location.deliveryCategories?.find(
+          (cat) => cat.categoryName === deliveryCategory
+        );
+
+        if (!category) {
+          return res.status(404).json({
+            success: false,
+            message: `Delivery category "${deliveryCategory}" not found in this location`,
+          });
+        }
+
+        if (!category.isActive) {
+          return res.status(400).json({
+            success: false,
+            message: `Delivery category "${deliveryCategory}" is not active`,
+          });
+        }
+
+        // Find option in category
+        const option = category.childOptions?.find(
+          (opt) => opt.optionName === deliveryOption
+        );
+
+        if (!option) {
+          return res.status(404).json({
+            success: false,
+            message: `Delivery option "${deliveryOption}" not found in category "${deliveryCategory}"`,
+          });
+        }
+
+        if (!option.isActive) {
+          return res.status(400).json({
+            success: false,
+            message: `Delivery option "${deliveryOption}" is not active`,
+          });
+        }
+
+        amount = option.price;
+        // Set initial category status to first status in workflow
+        categoryStatus = category.statusWorkflow?.[0]?.status || "pending";
+      } else {
+        // Legacy feeType-based delivery fee
+        feeType = deliveryInfo.feeType || location.deliveryFeeSettings?.defaultFeeType || "standard";
+
+        if (feeType === "custom") {
+          if (!deliveryInfo.customAmount || deliveryInfo.customAmount < 0) {
+            return res.status(400).json({
+              success: false,
+              message: "Custom fee amount is required for custom fee type",
+            });
+          }
+          amount = deliveryInfo.customAmount;
+        } else {
+          const feeMap = {
+            standard: location.deliveryFeeSettings?.standardFee || 5.0,
+            express: location.deliveryFeeSettings?.expressFee || 10.0,
+            overnight: location.deliveryFeeSettings?.overnightFee || 15.0,
+          };
+          amount = feeMap[feeType] || 5.0;
+        }
+      }
+
+      // Delivery fees are not taxed
+      const deliveryTax = 0;
+      deliveryFeeAmount = amount;
+
+      // Add delivery fee to total
+      totalAmount += deliveryFeeAmount;
+
+      // Prepare delivery fee object (will be created after sale)
+      deliveryFee = {
+        feeType: feeType || undefined,
+        deliveryCategory: deliveryCategory || undefined,
+        deliveryOption: deliveryOption || undefined,
+        categoryStatus: categoryStatus || undefined,
+        amount,
+        isTaxable: false,
+        taxAmount: deliveryTax,
+        totalAmount: deliveryFeeAmount,
+        deliveryAddress: typeof deliveryInfo.deliveryAddress === 'string' 
+          ? {
+              street: deliveryInfo.deliveryAddress,
+              city: deliveryInfo.city || "N/A",
+              state: deliveryInfo.state,
+              postalCode: deliveryInfo.postalCode,
+              country: deliveryInfo.country || "Kenya",
+              landmark: deliveryInfo.landmark,
+            }
+          : deliveryInfo.deliveryAddress,
+        recipientName: deliveryInfo.recipientName,
+        recipientPhone: deliveryInfo.recipientPhone,
+        recipientEmail: deliveryInfo.recipientEmail,
+        estimatedDelivery: deliveryInfo.estimatedDelivery,
+        notes: deliveryInfo.notes,
+        deliveryInstructions: deliveryInfo.deliveryInstructions,
+      };
+      
+      console.log("✅ Delivery fee object prepared:", {
+        amount: deliveryFee.amount,
+        totalAmount: deliveryFee.totalAmount,
+        feeType: deliveryFee.feeType,
+        deliveryCategory: deliveryFee.deliveryCategory,
+        deliveryAddress: deliveryFee.deliveryAddress,
+        recipientName: deliveryFee.recipientName,
+      });
+    } else {
+      console.log("⚠️ deliveryInfo or requiresDelivery is falsy:", {
+        hasDeliveryInfo: !!deliveryInfo,
+        requiresDelivery: deliveryInfo?.requiresDelivery,
+      });
+    }
 
     // Prepare payments (support split payments)
     let normalizedPayments = [];
     if (payments && Array.isArray(payments) && payments.length > 0) {
       // Basic validation
       const sum = payments.reduce((acc, p) => acc + (Number(p.amount) || 0), 0);
-      if (Math.abs(sum - totalAmount) > 0.01) {
+      if (sum <= 0) {
         return res.status(400).json({
           success: false,
-          message: `Payments total (${sum.toFixed(2)}) must equal sale total (${totalAmount.toFixed(2)})`,
+          message: "Payments total must be greater than 0",
+        });
+      }
+
+      if (sum - totalAmount > 0.01) {
+        return res.status(400).json({
+          success: false,
+          message: `Payments total (${sum.toFixed(2)}) cannot exceed sale total (${totalAmount.toFixed(2)})`,
         });
       }
 
@@ -196,16 +450,25 @@ const createSale = async (req, res) => {
       ];
     }
 
-    // Derive overall payment status
-    const overallPaymentStatus = (() => {
-      if (!normalizedPayments || normalizedPayments.length === 0)
-        return "pending";
-      const statuses = normalizedPayments.map((p) => p.status || "completed");
-      if (statuses.every((s) => s === "completed")) return "completed";
-      if (statuses.some((s) => s === "pending")) return "pending";
-      if (statuses.some((s) => s === "failed")) return "failed";
-      return "pending";
-    })();
+    const completedPaymentsTotal = getCompletedPaymentsTotal(normalizedPayments);
+    const initialBalanceDue = Math.max(
+      0,
+      roundMoney(totalAmount - completedPaymentsTotal),
+    );
+    const overallPaymentStatus = deriveSalePaymentStatus(
+      normalizedPayments,
+      totalAmount,
+    );
+
+    const normalizedTags = Array.isArray(tags) ? [...tags] : [];
+    if (initialBalanceDue > 0.01) {
+      if (!normalizedTags.includes("reservation")) {
+        normalizedTags.push("reservation");
+      }
+      if (!normalizedTags.includes("partial-payment")) {
+        normalizedTags.push("partial-payment");
+      }
+    }
 
     // Generate receipt and transaction numbers
     const receiptNumber = `REC-${organizationId}-${Date.now()}`;
@@ -230,6 +493,14 @@ const createSale = async (req, res) => {
         discountAmount: totalDiscount,
         taxAmount: totalTax,
         totalAmount,
+        deliveryFeeAmount: deliveryFeeAmount || 0,
+        requiresDelivery: deliveryInfo?.requiresDelivery || false,
+        deliveryStatus: deliveryInfo?.requiresDelivery ? "pending" : "not_required",
+        // NEW: Delivery category snapshot at time of sale
+        deliveryCategory: deliveryFee?.deliveryCategory || undefined,
+        deliveryOption: deliveryFee?.deliveryOption || undefined,
+        categoryStatus: deliveryFee?.categoryStatus || undefined,
+        deliveryStatusSyncedAt: deliveryInfo?.requiresDelivery ? new Date() : undefined,
         paymentMethod:
           normalizedPayments.length === 1
             ? normalizedPayments[0].method
@@ -241,10 +512,78 @@ const createSale = async (req, res) => {
         completedAt: new Date(),
         inventoryStatus: "pending",
         notes,
-        tags: tags || [],
+        tags: normalizedTags,
       });
 
       await sale.save({ session });
+
+      let createdReceivable = null;
+      if (initialBalanceDue > 0.01) {
+        createdReceivable = new Receivable({
+          organizationId,
+          locationId,
+          saleId: sale._id,
+          customerId: customerId || undefined,
+          customerName: customerName || undefined,
+          totalDue: roundMoney(totalAmount),
+          totalPaid: completedPaymentsTotal,
+          balanceDue: initialBalanceDue,
+          status: completedPaymentsTotal > 0 ? "partial" : "open",
+          payments: normalizedPayments.map((p) => ({
+            method: p.method,
+            amount: Number(p.amount) || 0,
+            reference: p.reference || undefined,
+            status: p.status || "completed",
+            cardLast4: p.cardLast4 || undefined,
+            cardBrand: p.cardBrand || undefined,
+            collectedBy: req.user.userId,
+            collectedAt: new Date(),
+          })),
+          lastPaymentAt: completedPaymentsTotal > 0 ? new Date() : undefined,
+          createdBy: req.user.userId,
+          updatedBy: req.user.userId,
+        });
+
+        await createdReceivable.save({ session });
+      }
+
+      // Create delivery fee if required
+      let createdDeliveryFee = null;
+      if (deliveryFee) {
+        try {
+          console.log("Creating delivery fee with data:", {
+            organizationId,
+            locationId,
+            saleId: sale._id,
+            recipientName: deliveryFee.recipientName,
+            deliveryAddress: deliveryFee.deliveryAddress,
+            amount: deliveryFee.amount,
+            feeType: deliveryFee.feeType,
+            deliveryCategory: deliveryFee.deliveryCategory,
+          });
+          
+          createdDeliveryFee = new DeliveryFee({
+            organizationId,
+            locationId,
+            saleId: sale._id,
+            ...deliveryFee,
+            status: "pending",
+            createdBy: req.user.userId,
+          });
+          await createdDeliveryFee.save({ session });
+
+          // Link delivery fee to sale
+          sale.deliveryFeeId = createdDeliveryFee._id;
+          await sale.save({ session });
+          
+          console.log("✅ Delivery fee created successfully:", createdDeliveryFee._id);
+        } catch (deliveryError) {
+          console.error("❌ Error creating delivery fee:", deliveryError);
+          throw new Error(`Delivery creation failed: ${deliveryError.message}`);
+        }
+      } else {
+        console.log("⚠️ No delivery fee data to create (deliveryInfo.requiresDelivery might be false)");
+      }
 
       // Process inventory updates within transaction
       await processInventoryUpdates(sale, organizationId, session);
@@ -260,7 +599,16 @@ const createSale = async (req, res) => {
           receiptNumber: sale.receiptNumber,
           transactionId: sale.transactionId,
           totalAmount: sale.totalAmount,
+          deliveryFeeAmount: sale.deliveryFeeAmount,
+          requiresDelivery: sale.requiresDelivery,
+          deliveryStatus: sale.deliveryStatus,
+          deliveryFeeId: createdDeliveryFee?._id,
+          trackingNumber: createdDeliveryFee?.trackingNumber,
           status: sale.status,
+          paymentStatus: sale.paymentStatus,
+          amountPaid: completedPaymentsTotal,
+          balanceDue: initialBalanceDue,
+          receivableId: createdReceivable?._id,
           itemCount: sale.items.length,
           createdAt: sale.createdAt,
         },
@@ -278,6 +626,343 @@ const createSale = async (req, res) => {
       message: "Failed to create sale",
       error: error.message,
     });
+  }
+};
+
+/**
+ * GET /sales/receivables
+ * List receivables (open, partial, paid)
+ */
+const listReceivables = async (req, res) => {
+  try {
+    const { organizationId, userId, role } = req.user;
+    const {
+      locationId,
+      status,
+      saleId,
+      startDate,
+      endDate,
+      page = 1,
+      limit = 50,
+    } = req.query;
+
+    const query = { organizationId };
+
+    if (!["Owner", "Manager"].includes(role)) {
+      const membership = await UserOrganization.findOne({
+        userId,
+        organizationId,
+        status: "active",
+      })
+        .select("locations")
+        .lean();
+
+      if (membership?.locations?.length > 0) {
+        query.locationId = { $in: membership.locations };
+      }
+    }
+
+    if (locationId) query.locationId = locationId;
+    if (status) query.status = status;
+    if (saleId) query.saleId = saleId;
+
+    if (startDate || endDate) {
+      query.createdAt = {};
+      if (startDate) query.createdAt.$gte = new Date(startDate);
+      if (endDate) query.createdAt.$lte = new Date(endDate);
+    }
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const [receivables, total] = await Promise.all([
+      Receivable.find(query)
+        .populate("saleId", "receiptNumber transactionId totalAmount paymentStatus status")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      Receivable.countDocuments(query),
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        receivables,
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total,
+          pages: Math.ceil(total / parseInt(limit)),
+        },
+      },
+    });
+  } catch (error) {
+    console.error("List receivables error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to list receivables",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * GET /sales/:id/receivable
+ * Get receivable details for a sale
+ */
+const getSaleReceivable = async (req, res) => {
+  try {
+    const { organizationId, userId, role } = req.user;
+    const { id } = req.params;
+
+    const sale = await Sale.findOne({ _id: id, organizationId })
+      .select("_id locationId totalAmount paymentStatus payments")
+      .lean();
+
+    if (!sale) {
+      return res.status(404).json({
+        success: false,
+        message: "Sale not found",
+      });
+    }
+
+    const hasAccess = await userHasLocationAccess({
+      organizationId,
+      userId,
+      role,
+      locationId: sale.locationId,
+    });
+
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied. You do not have access to this location.",
+        code: "LOCATION_ACCESS_DENIED",
+      });
+    }
+
+    const receivable = await Receivable.findOne({ organizationId, saleId: id }).lean();
+    if (!receivable) {
+      const amountPaid = getCompletedPaymentsTotal(sale.payments || []);
+      const balanceDue = Math.max(0, roundMoney((sale.totalAmount || 0) - amountPaid));
+      return res.json({
+        success: true,
+        data: {
+          saleId: sale._id,
+          totalDue: sale.totalAmount,
+          totalPaid: amountPaid,
+          balanceDue,
+          status: balanceDue > 0.01 ? "open" : "paid",
+          payments: sale.payments || [],
+        },
+      });
+    }
+
+    res.json({
+      success: true,
+      data: receivable,
+    });
+  } catch (error) {
+    console.error("Get sale receivable error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch sale receivable",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * POST /sales/:id/payments
+ * Add additional payment to settle outstanding receivable
+ */
+const recordSalePayment = async (req, res) => {
+  const session = await Sale.startSession();
+
+  try {
+    const { organizationId, userId, role } = req.user;
+    const { id } = req.params;
+    const {
+      method,
+      amount,
+      reference,
+      status = "completed",
+      cardLast4,
+      cardBrand,
+      notes,
+    } = req.body;
+
+    if (!method || Number(amount) <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "method and amount (> 0) are required",
+      });
+    }
+
+    const sale = await Sale.findOne({ _id: id, organizationId }).session(session);
+    if (!sale) {
+      return res.status(404).json({
+        success: false,
+        message: "Sale not found",
+      });
+    }
+
+    const hasAccess = await userHasLocationAccess({
+      organizationId,
+      userId,
+      role,
+      locationId: sale.locationId,
+    });
+
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied. You do not have access to this location.",
+        code: "LOCATION_ACCESS_DENIED",
+      });
+    }
+
+    if (sale.status === "voided") {
+      return res.status(400).json({
+        success: false,
+        message: "Cannot add payment to a voided sale",
+      });
+    }
+
+    session.startTransaction();
+
+    let receivable = await Receivable.findOne({ organizationId, saleId: sale._id }).session(
+      session,
+    );
+
+    if (!receivable) {
+      const paid = getCompletedPaymentsTotal(sale.payments || []);
+      const outstanding = Math.max(0, roundMoney((sale.totalAmount || 0) - paid));
+
+      if (outstanding <= 0.01) {
+        await session.abortTransaction();
+        return res.status(400).json({
+          success: false,
+          message: "Sale is already fully paid",
+        });
+      }
+
+      receivable = new Receivable({
+        organizationId,
+        locationId: sale.locationId,
+        saleId: sale._id,
+        customerId: sale.customerId || undefined,
+        customerName: sale.customerName || undefined,
+        totalDue: roundMoney(sale.totalAmount),
+        totalPaid: paid,
+        balanceDue: outstanding,
+        status: paid > 0 ? "partial" : "open",
+        payments: (sale.payments || []).map((p) => ({
+          method: p.method,
+          amount: Number(p.amount) || 0,
+          reference: p.reference || undefined,
+          status: p.status || "completed",
+          cardLast4: p.cardLast4 || undefined,
+          cardBrand: p.cardBrand || undefined,
+          collectedBy: sale.cashierId,
+          collectedAt: sale.createdAt || new Date(),
+        })),
+        createdBy: sale.cashierId,
+        updatedBy: userId,
+      });
+    }
+
+    if (["paid", "cancelled"].includes(receivable.status) || receivable.balanceDue <= 0.01) {
+      await session.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message: "No outstanding receivable balance for this sale",
+      });
+    }
+
+    const paymentAmount = roundMoney(amount);
+    if (paymentAmount - receivable.balanceDue > 0.01) {
+      await session.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message: `Payment amount (${paymentAmount.toFixed(2)}) cannot exceed balance due (${receivable.balanceDue.toFixed(2)})`,
+      });
+    }
+
+    const paymentEntry = {
+      method,
+      amount: paymentAmount,
+      reference: reference || undefined,
+      status,
+      cardLast4: cardLast4 || undefined,
+      cardBrand: cardBrand || undefined,
+      collectedBy: userId,
+      collectedAt: new Date(),
+    };
+
+    receivable.payments.push(paymentEntry);
+    if (status === "completed") {
+      receivable.totalPaid = roundMoney((receivable.totalPaid || 0) + paymentAmount);
+      receivable.balanceDue = Math.max(
+        0,
+        roundMoney((receivable.totalDue || 0) - (receivable.totalPaid || 0)),
+      );
+      receivable.lastPaymentAt = new Date();
+    }
+
+    if (notes) {
+      receivable.notes = notes;
+    }
+
+    if (receivable.balanceDue <= 0.01) {
+      receivable.balanceDue = 0;
+      receivable.status = "paid";
+    } else if (receivable.totalPaid > 0) {
+      receivable.status = "partial";
+    } else {
+      receivable.status = "open";
+    }
+
+    receivable.updatedBy = userId;
+    await receivable.save({ session });
+
+    sale.payments.push({
+      method,
+      amount: paymentAmount,
+      reference: reference || undefined,
+      status,
+      cardLast4: cardLast4 || undefined,
+      cardBrand: cardBrand || undefined,
+    });
+
+    sale.paymentStatus = deriveSalePaymentStatus(sale.payments, sale.totalAmount);
+    sale.lastModified = new Date();
+    sale.modifiedBy = userId;
+    await sale.save({ session });
+
+    await session.commitTransaction();
+
+    res.status(201).json({
+      success: true,
+      message: "Payment recorded successfully",
+      data: {
+        saleId: sale._id,
+        paymentStatus: sale.paymentStatus,
+        amountPaid: receivable.totalPaid,
+        balanceDue: receivable.balanceDue,
+        receivableStatus: receivable.status,
+        receivableId: receivable._id,
+      },
+    });
+  } catch (error) {
+    await session.abortTransaction();
+    console.error("Record sale payment error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to record sale payment",
+      error: error.message,
+    });
+  } finally {
+    await session.endSession();
   }
 };
 
@@ -495,6 +1180,7 @@ const listSales = async (req, res) => {
       endDate,
       receiptNumber,
       idempotencyKey,
+      search,
       limit = 50,
       page = 1,
     } = req.query;
@@ -533,6 +1219,23 @@ const listSales = async (req, res) => {
         filter.$or = receiptFilters;
       }
     }
+
+    if (search) {
+      const searchFilters = [
+        { receiptNumber: search },
+        { transactionId: search },
+        { idempotencyKey: search },
+      ];
+
+      if (filter.$or) {
+        filter.$and = [{ $or: filter.$or }, { $or: searchFilters }];
+        delete filter.$or;
+      } else if (filter.$and) {
+        filter.$and.push({ $or: searchFilters });
+      } else {
+        filter.$or = searchFilters;
+      }
+    }
     if (locationId) filter.locationId = locationId;
     if (status) filter.status = status;
     if (paymentMethod) {
@@ -551,10 +1254,25 @@ const listSales = async (req, res) => {
       }
     }
 
+    if (req.query.paymentStatus) {
+      filter.paymentStatus = req.query.paymentStatus;
+    }
+
     if (startDate || endDate) {
       filter.createdAt = {};
       if (startDate) filter.createdAt.$gte = new Date(startDate);
       if (endDate) filter.createdAt.$lte = new Date(endDate);
+    }
+
+    // Delivery category and status filtering
+    if (req.query.deliveryCategory) {
+      filter.deliveryCategory = req.query.deliveryCategory;
+    }
+    if (req.query.categoryStatus) {
+      filter.categoryStatus = req.query.categoryStatus;
+    }
+    if (req.query.requiresDelivery) {
+      filter.requiresDelivery = req.query.requiresDelivery === "true";
     }
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
@@ -1156,6 +1874,320 @@ async function reverseInventoryForItems(sale, organizationId, refundedItems) {
   );
 }
 
+/**
+ * GET /reports/by-delivery-category
+ * Get sales breakdown by delivery category with metrics
+ */
+const getDeliveryCategoryReport = async (req, res) => {
+  try {
+    const { organizationId } = req.user;
+    const { locationId, startDate, endDate } = req.query;
+
+    if (!startDate || !endDate) {
+      return res.status(400).json({
+        success: false,
+        message: "startDate and endDate are required",
+      });
+    }
+
+    const filter = {
+      organizationId,
+      status: "completed",
+      requiresDelivery: true,
+      deliveryCategory: { $exists: true, $ne: null },
+      createdAt: {
+        $gte: new Date(startDate),
+        $lte: new Date(endDate),
+      },
+    };
+
+    if (locationId) filter.locationId = locationId;
+
+    const sales = await Sale.find(filter).lean();
+
+    // Group by delivery category
+    const categoryMap = {};
+    let totalRevenue = 0;
+    let totalDeliveryFees = 0;
+
+    for (const sale of sales) {
+      const category = sale.deliveryCategory || "Uncategorized";
+      const option = sale.deliveryOption || "Standard";
+      const catStatus = sale.categoryStatus || sale.deliveryStatus || "pending";
+
+      if (!categoryMap[category]) {
+        categoryMap[category] = {
+          category,
+          count: 0,
+          revenue: 0,
+          deliveryFees: 0,
+          byOption: {},
+          byStatus: {},
+        };
+      }
+
+      const categoryRecord = categoryMap[category];
+      categoryRecord.count += 1;
+      categoryRecord.revenue += Number(sale.totalAmount) || 0;
+      categoryRecord.deliveryFees +=
+        (sale.deliveryInfo?.deliveryFee || 0);
+
+      // Track by option
+      if (!categoryRecord.byOption[option]) {
+        categoryRecord.byOption[option] = { count: 0, revenue: 0 };
+      }
+      categoryRecord.byOption[option].count += 1;
+      categoryRecord.byOption[option].revenue +=
+        Number(sale.totalAmount) || 0;
+
+      // Track by status
+      if (!categoryRecord.byStatus[catStatus]) {
+        categoryRecord.byStatus[catStatus] = { count: 0, revenue: 0 };
+      }
+      categoryRecord.byStatus[catStatus].count += 1;
+      categoryRecord.byStatus[catStatus].revenue +=
+        Number(sale.totalAmount) || 0;
+
+      totalRevenue += Number(sale.totalAmount) || 0;
+      totalDeliveryFees += sale.deliveryInfo?.deliveryFee || 0;
+    }
+
+    // Calculate percentages
+    const byCategory = {};
+    for (const [category, data] of Object.entries(categoryMap)) {
+      byCategory[category] = {
+        ...data,
+        percentage: totalRevenue > 0 ? 
+          ((data.revenue / totalRevenue) * 100).toFixed(2) + "%" : 
+          "0%",
+        avgFee: data.count > 0 ? 
+          (data.deliveryFees / data.count).toFixed(2) : 
+          "0",
+      };
+    }
+
+    res.json({
+      success: true,
+      data: {
+        period: {
+          startDate,
+          endDate,
+        },
+        summary: {
+          totalCategories: Object.keys(byCategory).length,
+          totalDeliveries: sales.length,
+          totalRevenue: totalRevenue.toFixed(2),
+          totalDeliveryFees: totalDeliveryFees.toFixed(2),
+        },
+        byCategory,
+      },
+    });
+  } catch (error) {
+    console.error("Delivery category report error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to generate delivery category report",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * GET /reports/delivery-metrics
+ * Get high-level delivery KPIs and performance metrics
+ */
+const getDeliveryMetrics = async (req, res) => {
+  try {
+    const { organizationId } = req.user;
+    const { locationId, startDate, endDate } = req.query;
+
+    if (!startDate || !endDate) {
+      return res.status(400).json({
+        success: false,
+        message: "startDate and endDate are required",
+      });
+    }
+
+    const filter = {
+      organizationId,
+      status: "completed",
+      requiresDelivery: true,
+      createdAt: {
+        $gte: new Date(startDate),
+        $lte: new Date(endDate),
+      },
+    };
+
+    if (locationId) filter.locationId = locationId;
+
+    const allDeliveries = await Sale.find(filter).lean();
+
+    // Calculate metrics
+    const successStatuses = ["delivered", "completed", "completed-successfully"];
+    const failedStatuses = ["failed", "undeliverable", "cancelled"];
+
+    let successfulCount = 0;
+    let failedCount = 0;
+    let totalDeliveryFees = 0;
+    let totalRevenue = 0;
+
+    for (const sale of allDeliveries) {
+      const saleStatus = sale.categoryStatus || 
+                        sale.deliveryStatus || 
+                        "pending";
+      
+      if (successStatuses.includes(saleStatus.toLowerCase())) {
+        successfulCount += 1;
+      } else if (failedStatuses.includes(saleStatus.toLowerCase())) {
+        failedCount += 1;
+      }
+
+      totalDeliveryFees += sale.deliveryInfo?.deliveryFee || 0;
+      totalRevenue += Number(sale.totalAmount) || 0;
+    }
+
+    const totalDeliveries = allDeliveries.length;
+    const successRate = totalDeliveries > 0 ? 
+      ((successfulCount / totalDeliveries) * 100).toFixed(2) : 
+      "0";
+    const failureRate = totalDeliveries > 0 ? 
+      ((failedCount / totalDeliveries) * 100).toFixed(2) : 
+      "0";
+    const avgDeliveryFee = totalDeliveries > 0 ? 
+      (totalDeliveryFees / totalDeliveries).toFixed(2) : 
+      "0";
+    const feePercentage = totalRevenue > 0 ? 
+      ((totalDeliveryFees / totalRevenue) * 100).toFixed(2) : 
+      "0";
+
+    res.json({
+      success: true,
+      data: {
+        period: {
+          startDate,
+          endDate,
+        },
+        metrics: {
+          totalDeliveries,
+          successfulDeliveries: successfulCount,
+          failedDeliveries: failedCount,
+          pendingDeliveries: totalDeliveries - successfulCount - failedCount,
+          successRate: successRate + "%",
+          failureRate: failureRate + "%",
+          totalDeliveryFees: totalDeliveryFees.toFixed(2),
+          avgDeliveryFee,
+          deliveryFeesAsPercentOfRevenue: feePercentage + "%",
+        },
+      },
+    });
+  } catch (error) {
+    console.error("Delivery metrics error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to calculate delivery metrics",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * GET /reports/delivery-status-flow
+ * Get distribution of deliveries across different statuses (bottleneck analysis)
+ */
+const getDeliveryStatusFlow = async (req, res) => {
+  try {
+    const { organizationId } = req.user;
+    const { locationId, startDate, endDate } = req.query;
+
+    if (!startDate || !endDate) {
+      return res.status(400).json({
+        success: false,
+        message: "startDate and endDate are required",
+      });
+    }
+
+    const filter = {
+      organizationId,
+      status: "completed",
+      requiresDelivery: true,
+      createdAt: {
+        $gte: new Date(startDate),
+        $lte: new Date(endDate),
+      },
+    };
+
+    if (locationId) filter.locationId = locationId;
+
+    const deliveries = await Sale.find(filter)
+      .select("categoryStatus deliveryStatus")
+      .lean();
+
+    // Count by status
+    const statusCounts = {};
+    let totalDeliveries = 0;
+
+    for (const delivery of deliveries) {
+      totalDeliveries += 1;
+      const status = 
+        delivery.categoryStatus || 
+        delivery.deliveryStatus || 
+        "pending";
+
+      if (!statusCounts[status]) {
+        statusCounts[status] = 0;
+      }
+      statusCounts[status] += 1;
+    }
+
+    // Calculate percentages
+    const statusFlow = {};
+    const percentages = {};
+
+    for (const [status, count] of Object.entries(statusCounts)) {
+      statusFlow[status] = count;
+      percentages[status] = totalDeliveries > 0 ? 
+        ((count / totalDeliveries) * 100).toFixed(2) + "%" : 
+        "0%";
+    }
+
+    // Sort by count (highest first) for bottleneck visibility
+    const sortedFlow = Object.entries(statusFlow)
+      .sort((a, b) => b[1] - a[1])
+      .reduce((obj, [key, val]) => {
+        obj[key] = val;
+        return obj;
+      }, {});
+
+    const sortedPercentages = Object.entries(percentages)
+      .sort((a, b) => parseInt(b[1]) - parseInt(a[1]))
+      .reduce((obj, [key, val]) => {
+        obj[key] = val;
+        return obj;
+      }, {});
+
+    res.json({
+      success: true,
+      data: {
+        period: {
+          startDate,
+          endDate,
+        },
+        totalDeliveries,
+        statusFlow: sortedFlow,
+        percentages: sortedPercentages,
+        topBottleneck: Object.keys(sortedFlow)[0] || "none",
+      },
+    });
+  } catch (error) {
+    console.error("Delivery status flow error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to generate delivery status flow report",
+      error: error.message,
+    });
+  }
+};
+
 // Routes
 router.post(
   "/",
@@ -1167,6 +2199,36 @@ router.get(
   "/reports/summary",
   requirePermission("view_reports"),
   getSalesSummary,
+);
+router.get(
+  "/reports/by-delivery-category",
+  requirePermission("view_reports"),
+  getDeliveryCategoryReport,
+);
+router.get(
+  "/reports/delivery-metrics",
+  requirePermission("view_reports"),
+  getDeliveryMetrics,
+);
+router.get(
+  "/reports/delivery-status-flow",
+  requirePermission("view_reports"),
+  getDeliveryStatusFlow,
+);
+router.get(
+  "/receivables",
+  requirePermission("view_sale_history"),
+  listReceivables,
+);
+router.get(
+  "/:id/receivable",
+  requirePermission("view_sale_history"),
+  getSaleReceivable,
+);
+router.post(
+  "/:id/payments",
+  requirePermission("create_sale"),
+  recordSalePayment,
 );
 router.get("/:id", requirePermission("view_sale_history"), getSale);
 router.get("/", requirePermission("view_sale_history"), listSales);

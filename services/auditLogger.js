@@ -191,12 +191,13 @@ const logUserStatusChange = async (
  * @param {String} action - Action (created, updated, deleted)
  * @param {Object} details - Additional details
  */
-const logRoleChange = async (adminId, roleId, action, details = {}) => {
+const logRoleChange = async (adminId, roleId, action, ipAddress, details = {}) => {
   try {
     const auditLog = new TokenAuditLog({
       adminId,
       eventType: "role_changed",
       details: `Role ${action}: ${roleId}`,
+      ipAddress,
       ...details,
     });
 

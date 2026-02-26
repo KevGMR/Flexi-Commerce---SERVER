@@ -6,6 +6,27 @@ const RefreshToken = require("../models/RefreshToken");
 const refreshLocks = new Map();
 const LOCK_TTL = 100; // milliseconds
 
+const parseDurationSeconds = (value, fallbackSeconds) => {
+  if (value === undefined || value === null || value === "") {
+    return fallbackSeconds;
+  }
+
+  const normalized = String(value).trim();
+  const match = normalized.match(/^(\d+)([smhd])?$/i);
+
+  if (!match) return fallbackSeconds;
+
+  const amount = parseInt(match[1], 10);
+  const unit = (match[2] || "s").toLowerCase();
+
+  if (unit === "s") return amount;
+  if (unit === "m") return amount * 60;
+  if (unit === "h") return amount * 60 * 60;
+  if (unit === "d") return amount * 60 * 60 * 24;
+
+  return fallbackSeconds;
+};
+
 /**
  * Generate Access Token (JWT)
  * @param {String} userId - User ID
@@ -16,7 +37,7 @@ const LOCK_TTL = 100; // milliseconds
  * @returns {String} JWT access token
  */
 const generateAccessToken = (userId, role, permissions, deviceId, organizationId) => {
-  const expiryMinutes = parseInt(process.env.ACCESS_TOKEN_EXPIRY || "15");
+  const expirySeconds = parseDurationSeconds(process.env.ACCESS_TOKEN_EXPIRY, 15 * 60);
   
   const payload = {
     userId,
@@ -28,7 +49,7 @@ const generateAccessToken = (userId, role, permissions, deviceId, organizationId
   };
 
   return jwt.sign(payload, process.env.JWT_SECRET, {
-    expiresIn: `${expiryMinutes}m`,
+    expiresIn: expirySeconds,
   });
 };
 
@@ -50,7 +71,7 @@ const generateRefreshToken = async (
   organizationId,
   deviceName = "Unknown Device"
 ) => {
-  const expiryDays = parseInt(process.env.REFRESH_TOKEN_EXPIRY || "7");
+  const expirySeconds = parseDurationSeconds(process.env.REFRESH_TOKEN_EXPIRY, 7 * 24 * 60 * 60);
   const requestId = crypto.randomBytes(16).toString("hex");
   
   // Generate random token
@@ -63,7 +84,7 @@ const generateRefreshToken = async (
     .digest("hex");
 
   const expiresAt = new Date();
-  expiresAt.setDate(expiresAt.getDate() + expiryDays);
+  expiresAt.setSeconds(expiresAt.getSeconds() + expirySeconds);
 
   const tokenDoc = new RefreshToken({
     token: hashedToken,
@@ -87,19 +108,23 @@ const generateRefreshToken = async (
  * Rotate Refresh Token with deduplication
  * @param {String} oldToken - Old refresh token
  * @param {String} userId - User ID
+ * @param {String} role - Updated role for organization
  * @param {Array} permissions - Updated permissions
  * @param {String} deviceId - Device ID
  * @param {String} ipAddress - IP address
  * @param {String} userAgent - User agent
+ * @param {String} organizationId - Organization ID
  * @returns {Object} { accessToken, refreshToken, tokenDoc }
  */
 const rotateRefreshToken = async (
   oldToken,
   userId,
+  role,
   permissions,
   deviceId,
   ipAddress,
-  userAgent
+  userAgent,
+  organizationId
 ) => {
   // Deduplication lock key
   const lockKey = `${userId}:${deviceId}`;
@@ -161,14 +186,12 @@ const rotateRefreshToken = async (
     await newTokenDoc.save();
 
     // Generate new access token
-    const User = require("../models/User");
-    const user = await User.findById(userId);
-    
     const newAccessToken = generateAccessToken(
       userId,
-      user.role,
+      role,
       permissions,
-      deviceId
+      deviceId,
+      organizationId || oldTokenDoc.organizationId
     );
 
     return {

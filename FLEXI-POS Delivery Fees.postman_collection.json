@@ -1,0 +1,1814 @@
+{
+	"info": {
+		"_postman_id": "delivery-fees-collection-2026",
+		"name": "FLEXI-POS Delivery Fees",
+		"description": "Complete API collection for delivery fee management including standalone deliveries, sales with delivery, driver assignment, tracking, and customizable delivery categories",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"_exporter_id": "flexi-pos"
+	},
+	"item": [
+		{
+			"name": "Delivery Categories Management",
+			"item": [
+				{
+					"name": "Create Delivery Category",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 201) {",
+									"    const response = pm.response.json();",
+									"    pm.environment.set('categoryId', response.category._id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"categoryName\": \"Shop Pickup\",\n  \"description\": \"Customer picks up from shop location\",\n  \"statusWorkflow\": [\n    {\n      \"status\": \"pending\",\n      \"displayName\": \"Order Pending\",\n      \"order\": 0\n    },\n    {\n      \"status\": \"ready_for_pickup\",\n      \"displayName\": \"Ready for Pickup\",\n      \"order\": 1\n    },\n    {\n      \"status\": \"picked_up\",\n      \"displayName\": \"Picked Up\",\n      \"order\": 2\n    }\n  ],\n  \"childOptions\": [\n    {\n      \"optionName\": \"Same Day\",\n      \"price\": 0,\n      \"estimatedDays\": 0\n    },\n    {\n      \"optionName\": \"Next Day\",\n      \"price\": 0,\n      \"estimatedDays\": 1\n    }\n  ]\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/locations/{{locationId}}/delivery-categories",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"locations",
+								"{{locationId}}",
+								"delivery-categories"
+							]
+						},
+						"description": "Create a new delivery category with custom status workflow and child options"
+					},
+					"response": []
+				},
+				{
+					"name": "Create Local Delivery Category",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"categoryName\": \"Local Delivery\",\n  \"description\": \"Delivery within city limits\",\n  \"statusWorkflow\": [\n    {\n      \"status\": \"pending\",\n      \"displayName\": \"Pending\",\n      \"order\": 0\n    },\n    {\n      \"status\": \"dispatched\",\n      \"displayName\": \"Dispatched\",\n      \"order\": 1\n    },\n    {\n      \"status\": \"out_for_delivery\",\n      \"displayName\": \"Out for Delivery\",\n      \"order\": 2\n    },\n    {\n      \"status\": \"delivered\",\n      \"displayName\": \"Delivered\",\n      \"order\": 3\n    }\n  ],\n  \"childOptions\": [\n    {\n      \"optionName\": \"Standard (2-3 days)\",\n      \"price\": 5.00,\n      \"estimatedDays\": 2\n    },\n    {\n      \"optionName\": \"Express (Same Day)\",\n      \"price\": 15.00,\n      \"estimatedDays\": 0\n    }\n  ]\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/locations/{{locationId}}/delivery-categories",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"locations",
+								"{{locationId}}",
+								"delivery-categories"
+							]
+						},
+						"description": "Create Local Delivery category with multiple pricing options"
+					},
+					"response": []
+				},
+				{
+					"name": "Create Matatu/Saccos Category",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"categoryName\": \"Matatu/Saccos\",\n  \"description\": \"Delivery via public transport\",\n  \"statusWorkflow\": [\n    {\n      \"status\": \"pending\",\n      \"displayName\": \"Pending Booking\",\n      \"order\": 0\n    },\n    {\n      \"status\": \"booked\",\n      \"displayName\": \"Transport Booked\",\n      \"order\": 1\n    },\n    {\n      \"status\": \"in_transit\",\n      \"displayName\": \"In Transit\",\n      \"order\": 2\n    },\n    {\n      \"status\": \"arrived\",\n      \"displayName\": \"Arrived at Destination\",\n      \"order\": 3\n    },\n    {\n      \"status\": \"collected\",\n      \"displayName\": \"Collected by Customer\",\n      \"order\": 4\n    }\n  ],\n  \"childOptions\": [\n    {\n      \"optionName\": \"Nairobi to Mombasa\",\n      \"price\": 8.00,\n      \"estimatedDays\": 1\n    },\n    {\n      \"optionName\": \"Nairobi to Kisumu\",\n      \"price\": 6.00,\n      \"estimatedDays\": 1\n    },\n    {\n      \"optionName\": \"Within County\",\n      \"price\": 3.00,\n      \"estimatedDays\": 0\n    }\n  ]\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/locations/{{locationId}}/delivery-categories",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"locations",
+								"{{locationId}}",
+								"delivery-categories"
+							]
+						},
+						"description": "Create Matatu/Saccos category for public transport deliveries"
+					},
+					"response": []
+				},
+				{
+					"name": "List All Categories",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/locations/{{locationId}}/delivery-categories",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"locations",
+								"{{locationId}}",
+								"delivery-categories"
+							]
+						},
+						"description": "Get all delivery categories for a location (active only by default)"
+					},
+					"response": []
+				},
+				{
+					"name": "List All Categories (Include Inactive)",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/locations/{{locationId}}/delivery-categories?includeInactive=true",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"locations",
+								"{{locationId}}",
+								"delivery-categories"
+							],
+							"query": [
+								{
+									"key": "includeInactive",
+									"value": "true"
+								}
+							]
+						},
+						"description": "Get all delivery categories including inactive ones"
+					},
+					"response": []
+				},
+				{
+					"name": "Update Category",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"categoryName\": \"Shop Pickup (Updated)\",\n  \"description\": \"Updated description\",\n  \"isActive\": true\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/locations/{{locationId}}/delivery-categories/{{categoryId}}",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"locations",
+								"{{locationId}}",
+								"delivery-categories",
+								"{{categoryId}}"
+							]
+						},
+						"description": "Update category name, description, or active status"
+					},
+					"response": []
+				},
+				{
+					"name": "Update Category Workflow",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"statusWorkflow\": [\n    {\n      \"status\": \"pending\",\n      \"displayName\": \"Pending\",\n      \"order\": 0\n    },\n    {\n      \"status\": \"processing\",\n      \"displayName\": \"Processing Order\",\n      \"order\": 1\n    },\n    {\n      \"status\": \"ready\",\n      \"displayName\": \"Ready\",\n      \"order\": 2\n    },\n    {\n      \"status\": \"completed\",\n      \"displayName\": \"Completed\",\n      \"order\": 3\n    }\n  ]\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/locations/{{locationId}}/delivery-categories/{{categoryId}}",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"locations",
+								"{{locationId}}",
+								"delivery-categories",
+								"{{categoryId}}"
+							]
+						},
+						"description": "Update the status workflow for a category"
+					},
+					"response": []
+				},
+				{
+					"name": "Deactivate Category",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"isActive\": false\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/locations/{{locationId}}/delivery-categories/{{categoryId}}",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"locations",
+								"{{locationId}}",
+								"delivery-categories",
+								"{{categoryId}}"
+							]
+						},
+						"description": "Deactivate a category (soft delete)"
+					},
+					"response": []
+				},
+				{
+					"name": "Delete Category",
+					"request": {
+						"method": "DELETE",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/locations/{{locationId}}/delivery-categories/{{categoryId}}",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"locations",
+								"{{locationId}}",
+								"delivery-categories",
+								"{{categoryId}}"
+							]
+						},
+						"description": "Permanently delete a delivery category"
+					},
+					"response": []
+				},
+				{
+					"name": "Add Option to Category",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 201) {",
+									"    const response = pm.response.json();",
+									"    pm.environment.set('optionId', response.option._id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"optionName\": \"Premium Same Day\",\n  \"price\": 20.00,\n  \"estimatedDays\": 0,\n  \"isActive\": true\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/locations/{{locationId}}/delivery-categories/{{categoryId}}/options",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"locations",
+								"{{locationId}}",
+								"delivery-categories",
+								"{{categoryId}}",
+								"options"
+							]
+						},
+						"description": "Add a new delivery option to a category"
+					},
+					"response": []
+				},
+				{
+					"name": "Update Option",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"optionName\": \"Premium Same Day (Updated)\",\n  \"price\": 25.00,\n  \"estimatedDays\": 0,\n  \"isActive\": true\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/locations/{{locationId}}/delivery-categories/{{categoryId}}/options/{{optionId}}",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"locations",
+								"{{locationId}}",
+								"delivery-categories",
+								"{{categoryId}}",
+								"options",
+								"{{optionId}}"
+							]
+						},
+						"description": "Update an option's name, price, or status"
+					},
+					"response": []
+				},
+				{
+					"name": "Deactivate Option",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"isActive\": false\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/locations/{{locationId}}/delivery-categories/{{categoryId}}/options/{{optionId}}",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"locations",
+								"{{locationId}}",
+								"delivery-categories",
+								"{{categoryId}}",
+								"options",
+								"{{optionId}}"
+							]
+						},
+						"description": "Deactivate a delivery option"
+					},
+					"response": []
+				},
+				{
+					"name": "Delete Option",
+					"request": {
+						"method": "DELETE",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/locations/{{locationId}}/delivery-categories/{{categoryId}}/options/{{optionId}}",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"locations",
+								"{{locationId}}",
+								"delivery-categories",
+								"{{categoryId}}",
+								"options",
+								"{{optionId}}"
+							]
+						},
+						"description": "Permanently delete an option from a category"
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Location Delivery Settings",
+			"item": [
+				{
+					"name": "Update Location Delivery Settings",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"enableDeliveryFees\": true,\n  \"taxDeliveryFees\": true,\n  \"standardFee\": 5.00,\n  \"expressFee\": 10.00,\n  \"overnightFee\": 15.00,\n  \"defaultFeeType\": \"standard\",\n  \"allowCustomFees\": true\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/locations/{{locationId}}/delivery-settings",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"locations",
+								"{{locationId}}",
+								"delivery-settings"
+							]
+						},
+						"description": "Configure delivery fee settings for a specific location"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Location (with delivery settings)",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/locations/{{locationId}}",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"locations",
+								"{{locationId}}"
+							]
+						},
+						"description": "Get location details including delivery fee settings"
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Delivery Fees",
+			"item": [
+				{
+					"name": "Create Standalone Delivery Fee",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 201) {",
+									"    const response = pm.response.json();",
+									"    pm.environment.set('deliveryFeeId', response.data._id);",
+									"    pm.environment.set('trackingNumber', response.data.trackingNumber);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"locationId\": \"{{locationId}}\",\n  \"feeType\": \"standard\",\n  \"recipientName\": \"John Doe\",\n  \"recipientPhone\": \"+254712345678\",\n  \"recipientEmail\": \"john.doe@example.com\",\n  \"deliveryAddress\": {\n    \"street\": \"123 Kenyatta Avenue\",\n    \"city\": \"Nairobi\",\n    \"state\": \"Nairobi County\",\n    \"postalCode\": \"00100\",\n    \"country\": \"Kenya\",\n    \"landmark\": \"Near City Market\"\n  },\n  \"deliveryInstructions\": \"Call upon arrival\",\n  \"notes\": \"Fragile items\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/delivery-fees",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"delivery-fees"
+							]
+						},
+						"description": "Create a standalone delivery fee (not linked to any sale)"
+					},
+					"response": []
+				},
+				{
+					"name": "Create Delivery - Shop Pickup",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 201) {",
+									"    const response = pm.response.json();",
+									"    pm.environment.set('deliveryFeeId', response.data._id);",
+									"    pm.environment.set('trackingNumber', response.data.trackingNumber);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"locationId\": \"{{locationId}}\",\n  \"deliveryCategory\": \"Shop Pickup\",\n  \"deliveryOption\": \"Standard Pickup\",\n  \"recipientName\": \"Michael Ouma\",\n  \"recipientPhone\": \"+254711223344\",\n  \"recipientEmail\": \"michael.ouma@example.com\",\n  \"deliveryInstructions\": \"Customer will pick up at main counter\",\n  \"notes\": \"Call when ready for pickup\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/delivery-fees",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"delivery-fees"
+							]
+						},
+						"description": "Create a delivery using Shop Pickup category"
+					},
+					"response": []
+				},
+				{
+					"name": "Create Delivery - Local Delivery Express",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 201) {",
+									"    const response = pm.response.json();",
+									"    pm.environment.set('deliveryFeeId', response.data._id);",
+									"    pm.environment.set('trackingNumber', response.data.trackingNumber);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"locationId\": \"{{locationId}}\",\n  \"deliveryCategory\": \"Local Delivery\",\n  \"deliveryOption\": \"Express Delivery\",\n  \"recipientName\": \"Sarah Mwangi\",\n  \"recipientPhone\": \"+254722334455\",\n  \"recipientEmail\": \"sarah.mwangi@example.com\",\n  \"deliveryAddress\": {\n    \"street\": \"45 Ngong Road\",\n    \"city\": \"Nairobi\",\n    \"state\": \"Nairobi County\",\n    \"postalCode\": \"00100\",\n    \"country\": \"Kenya\",\n    \"landmark\": \"Near Prestige Plaza\"\n  },\n  \"deliveryInstructions\": \"Same-day delivery requested\",\n  \"estimatedDelivery\": \"2026-02-08T16:00:00Z\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/delivery-fees",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"delivery-fees"
+							]
+						},
+						"description": "Create an express local delivery"
+					},
+					"response": []
+				},
+				{
+					"name": "Create Delivery - Matatu Route",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 201) {",
+									"    const response = pm.response.json();",
+									"    pm.environment.set('deliveryFeeId', response.data._id);",
+									"    pm.environment.set('trackingNumber', response.data.trackingNumber);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"locationId\": \"{{locationId}}\",\n  \"deliveryCategory\": \"Matatu/Saccos\",\n  \"deliveryOption\": \"Route 45 - Nairobi-Kiambu\",\n  \"recipientName\": \"David Kamau\",\n  \"recipientPhone\": \"+254733445566\",\n  \"deliveryAddress\": {\n    \"city\": \"Kiambu\",\n    \"country\": \"Kenya\",\n    \"landmark\": \"Kiambu Town Stage\"\n  },\n  \"deliveryInstructions\": \"Package will be sent via Matatu Route 45\",\n  \"notes\": \"Customer to collect at Kiambu Stage\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/delivery-fees",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"delivery-fees"
+							]
+						},
+						"description": "Create a delivery using Matatu/Saccos transport"
+					},
+					"response": []
+				},
+				{
+					"name": "Create Express Delivery",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"locationId\": \"{{locationId}}\",\n  \"feeType\": \"express\",\n  \"recipientName\": \"Jane Smith\",\n  \"recipientPhone\": \"+254798765432\",\n  \"deliveryAddress\": {\n    \"street\": \"456 Moi Avenue\",\n    \"city\": \"Mombasa\",\n    \"country\": \"Kenya\"\n  },\n  \"estimatedDelivery\": \"2026-02-08T18:00:00Z\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/delivery-fees",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"delivery-fees"
+							]
+						},
+						"description": "Create an express delivery with estimated delivery time (legacy feeType method)"
+					},
+					"response": []
+				},
+				{
+					"name": "Create Custom Fee Delivery",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"locationId\": \"{{locationId}}\",\n  \"feeType\": \"custom\",\n  \"customAmount\": 25.00,\n  \"isTaxable\": false,\n  \"recipientName\": \"Alice Johnson\",\n  \"recipientPhone\": \"+254723456789\",\n  \"deliveryAddress\": {\n    \"street\": \"789 Uhuru Highway\",\n    \"city\": \"Nairobi\",\n    \"country\": \"Kenya\"\n  },\n  \"notes\": \"Long-distance delivery outside standard zones\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/delivery-fees",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"delivery-fees"
+							]
+						},
+						"description": "Create a delivery with custom fee amount"
+					},
+					"response": []
+				},
+				{
+					"name": "List All Delivery Fees",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/delivery-fees?page=1&limit=20",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"delivery-fees"
+							],
+							"query": [
+								{
+									"key": "page",
+									"value": "1"
+								},
+								{
+									"key": "limit",
+									"value": "20"
+								}
+							]
+						},
+						"description": "List all delivery fees with pagination"
+					},
+					"response": []
+				},
+				{
+					"name": "List Delivery Fees by Status",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/delivery-fees?status=pending&page=1&limit=20",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"delivery-fees"
+							],
+							"query": [
+								{
+									"key": "status",
+									"value": "pending",
+									"description": "pending, assigned, in_transit, delivered, cancelled, failed"
+								},
+								{
+									"key": "page",
+									"value": "1"
+								},
+								{
+									"key": "limit",
+									"value": "20"
+								}
+							]
+						},
+						"description": "Filter delivery fees by status"
+					},
+					"response": []
+				},
+				{
+					"name": "List Delivery Fees by Location",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/delivery-fees?locationId={{locationId}}",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"delivery-fees"
+							],
+							"query": [
+								{
+									"key": "locationId",
+									"value": "{{locationId}}"
+								}
+							]
+						},
+						"description": "Get deliveries for a specific location"
+					},
+					"response": []
+				},
+				{
+					"name": "List Delivery Fees by Driver",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/delivery-fees?driverId={{driverId}}",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"delivery-fees"
+							],
+							"query": [
+								{
+									"key": "driverId",
+									"value": "{{driverId}}"
+								}
+							]
+						},
+						"description": "Get all deliveries assigned to a specific driver"
+					},
+					"response": []
+				},
+				{
+					"name": "List Delivery Fees by Date Range",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/delivery-fees?startDate=2026-02-01&endDate=2026-02-07",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"delivery-fees"
+							],
+							"query": [
+								{
+									"key": "startDate",
+									"value": "2026-02-01"
+								},
+								{
+									"key": "endDate",
+									"value": "2026-02-07"
+								}
+							]
+						},
+						"description": "Get deliveries within a date range"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Single Delivery Fee",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/delivery-fees/{{deliveryFeeId}}",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"delivery-fees",
+								"{{deliveryFeeId}}"
+							]
+						},
+						"description": "Get details of a single delivery fee with populated references"
+					},
+					"response": []
+				},
+				{
+					"name": "Update Delivery Fee Details",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"deliveryAddress\": {\n    \"street\": \"123 Updated Street\",\n    \"city\": \"Nairobi\",\n    \"country\": \"Kenya\"\n  },\n  \"recipientPhone\": \"+254700000000\",\n  \"notes\": \"Updated delivery instructions\",\n  \"estimatedDelivery\": \"2026-02-08T14:00:00Z\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/delivery-fees/{{deliveryFeeId}}",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"delivery-fees",
+								"{{deliveryFeeId}}"
+							]
+						},
+						"description": "Update delivery address, recipient info, or notes"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Delivery Statistics",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/delivery-fees/stats",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"delivery-fees",
+								"stats"
+							]
+						},
+						"description": "Get delivery statistics including counts by status, revenue, and average delivery time"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Delivery Stats by Location",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/delivery-fees/stats?locationId={{locationId}}",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"delivery-fees",
+								"stats"
+							],
+							"query": [
+								{
+									"key": "locationId",
+									"value": "{{locationId}}"
+								}
+							]
+						},
+						"description": "Get delivery statistics for a specific location"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Delivery Stats by Date Range",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/delivery-fees/stats?startDate=2026-02-01&endDate=2026-02-07",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"delivery-fees",
+								"stats"
+							],
+							"query": [
+								{
+									"key": "startDate",
+									"value": "2026-02-01"
+								},
+								{
+									"key": "endDate",
+									"value": "2026-02-07"
+								}
+							]
+						},
+						"description": "Get delivery statistics for a date range"
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Driver Assignment",
+			"item": [
+				{
+					"name": "Assign Driver to Delivery",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"driverId\": \"{{driverId}}\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/delivery-fees/{{deliveryFeeId}}/assign",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"delivery-fees",
+								"{{deliveryFeeId}}",
+								"assign"
+							]
+						},
+						"description": "Assign a driver to a pending delivery. Status automatically changes to 'assigned'."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Status Updates",
+			"item": [
+				{
+					"name": "Update Status - In Transit",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"status\": \"in_transit\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/delivery-fees/{{deliveryFeeId}}/status",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"delivery-fees",
+								"{{deliveryFeeId}}",
+								"status"
+							]
+						},
+						"description": "Mark delivery as in transit (driver picked up package)"
+					},
+					"response": []
+				},
+				{
+					"name": "Update Status - Delivered",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"status\": \"delivered\",\n  \"receivedByName\": \"John Doe\",\n  \"signatureUrl\": \"https://example.com/signatures/abc123.png\",\n  \"photoUrl\": \"https://example.com/photos/delivery-proof.jpg\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/delivery-fees/{{deliveryFeeId}}/status",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"delivery-fees",
+								"{{deliveryFeeId}}",
+								"status"
+							]
+						},
+						"description": "Mark delivery as completed with proof of delivery"
+					},
+					"response": []
+				},
+				{
+					"name": "Update Status - Failed",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"status\": \"failed\",\n  \"failReason\": \"Recipient not available after 3 attempts\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/delivery-fees/{{deliveryFeeId}}/status",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"delivery-fees",
+								"{{deliveryFeeId}}",
+								"status"
+							]
+						},
+						"description": "Mark delivery as failed with reason"
+					},
+					"response": []
+				},
+				{
+					"name": "Update Status - Cancelled",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"status\": \"cancelled\",\n  \"cancelReason\": \"Customer requested cancellation\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/delivery-fees/{{deliveryFeeId}}/status",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"delivery-fees",
+								"{{deliveryFeeId}}",
+								"status"
+							]
+						},
+						"description": "Cancel a delivery with reason (legacy status)"
+					},
+					"response": []
+				},
+				{
+					"name": "Update Category Status - Ready for Pickup",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"categoryStatus\": \"ready_for_pickup\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/delivery-fees/{{deliveryFeeId}}/status",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"delivery-fees",
+								"{{deliveryFeeId}}",
+								"status"
+							]
+						},
+						"description": "Update Shop Pickup status to ready_for_pickup (follows Shop Pickup custom workflow)"
+					},
+					"response": []
+				},
+				{
+					"name": "Update Category Status - Picked Up",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"categoryStatus\": \"picked_up\",\n  \"receivedByName\": \"Michael Ouma\",\n  \"signatureUrl\": \"https://example.com/signatures/pickup123.png\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/delivery-fees/{{deliveryFeeId}}/status",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"delivery-fees",
+								"{{deliveryFeeId}}",
+								"status"
+							]
+						},
+						"description": "Update Shop Pickup status to picked_up with proof of pickup"
+					},
+					"response": []
+				},
+				{
+					"name": "Update Category Status - Out for Delivery",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"categoryStatus\": \"out_for_delivery\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/delivery-fees/{{deliveryFeeId}}/status",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"delivery-fees",
+								"{{deliveryFeeId}}",
+								"status"
+							]
+						},
+						"description": "Update Local Delivery status to out_for_delivery (follows Local Delivery custom workflow)"
+					},
+					"response": []
+				},
+				{
+					"name": "Update Category Status - Completed",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"categoryStatus\": \"completed\",\n  \"receivedByName\": \"Sarah Mwangi\",\n  \"photoUrl\": \"https://example.com/photos/delivery-complete.jpg\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/delivery-fees/{{deliveryFeeId}}/status",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"delivery-fees",
+								"{{deliveryFeeId}}",
+								"status"
+							]
+						},
+						"description": "Update Local Delivery status to completed with proof of delivery"
+					},
+					"response": []
+				},
+				{
+					"name": "Update Category Status - In Transit (Matatu)",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"categoryStatus\": \"in_transit\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/delivery-fees/{{deliveryFeeId}}/status",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"delivery-fees",
+								"{{deliveryFeeId}}",
+								"status"
+							]
+						},
+						"description": "Update Matatu/Saccos status to in_transit (package on the vehicle)"
+					},
+					"response": []
+				},
+				{
+					"name": "Update Category Status - Ready for Collection",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"categoryStatus\": \"ready_for_collection\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/delivery-fees/{{deliveryFeeId}}/status",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"delivery-fees",
+								"{{deliveryFeeId}}",
+								"status"
+							]
+						},
+						"description": "Update Matatu/Saccos status to ready_for_collection (arrived at destination stage)"
+					},
+					"response": []
+				},
+				{
+					"name": "Update Category Status - Collected",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"categoryStatus\": \"collected\",\n  \"receivedByName\": \"David Kamau\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/delivery-fees/{{deliveryFeeId}}/status",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"delivery-fees",
+								"{{deliveryFeeId}}",
+								"status"
+							]
+						},
+						"description": "Update Matatu/Saccos status to collected (customer picked up package)"
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Cancel Delivery",
+			"request": {
+				"method": "DELETE",
+				"header": [
+					{
+						"key": "Authorization",
+						"value": "Bearer {{accessToken}}",
+						"type": "text"
+					}
+				],
+				"url": {
+					"raw": "{{baseUrl}}/delivery-fees/{{deliveryFeeId}}",
+					"host": [
+						"{{baseUrl}}"
+					],
+					"path": [
+						"delivery-fees",
+						"{{deliveryFeeId}}"
+					]
+				},
+				"description": "Cancel delivery (marks as cancelled, doesn't delete from database)"
+			},
+			"response": []
+		},
+		{
+			"name": "Sales with Delivery",
+			"item": [
+				{
+					"name": "Create Sale with Standard Delivery",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 201) {",
+									"    const response = pm.response.json();",
+									"    pm.environment.set('saleId', response.data.saleId);",
+									"    pm.environment.set('deliveryFeeId', response.data.deliveryFeeId);",
+									"    pm.environment.set('trackingNumber', response.data.trackingNumber);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"locationId\": \"{{locationId}}\",\n  \"items\": [\n    {\n      \"type\": \"flexi\",\n      \"productId\": \"{{productId}}\",\n      \"quantity\": 2,\n      \"unitPrice\": 50.00,\n      \"discount\": 0,\n      \"taxAmount\": 8.00\n    }\n  ],\n  \"paymentMethod\": \"card\",\n  \"deliveryInfo\": {\n    \"requiresDelivery\": true,\n    \"feeType\": \"standard\",\n    \"recipientName\": \"John Customer\",\n    \"recipientPhone\": \"+254712345678\",\n    \"recipientEmail\": \"john@example.com\",\n    \"deliveryAddress\": {\n      \"street\": \"123 Main Street\",\n      \"city\": \"Nairobi\",\n      \"state\": \"Nairobi County\",\n      \"postalCode\": \"00100\",\n      \"country\": \"Kenya\"\n    },\n    \"deliveryInstructions\": \"Ring doorbell twice\"\n  }\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/sales",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"sales"
+							]
+						},
+						"description": "Create a sale with standard delivery fee included"
+					},
+					"response": []
+				},
+				{
+					"name": "Create Sale with Express Delivery",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"locationId\": \"{{locationId}}\",\n  \"items\": [\n    {\n      \"type\": \"flexi\",\n      \"productId\": \"{{productId}}\",\n      \"quantity\": 1,\n      \"unitPrice\": 100.00,\n      \"taxAmount\": 16.00\n    }\n  ],\n  \"paymentMethod\": \"cash\",\n  \"deliveryInfo\": {\n    \"requiresDelivery\": true,\n    \"feeType\": \"express\",\n    \"recipientName\": \"Jane Williams\",\n    \"recipientPhone\": \"+254798765432\",\n    \"deliveryAddress\": {\n      \"street\": \"456 Express Lane\",\n      \"city\": \"Nairobi\",\n      \"country\": \"Kenya\"\n    },\n    \"estimatedDelivery\": \"2026-02-07T18:00:00Z\"\n  }\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/sales",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"sales"
+							]
+						},
+						"description": "Create a sale with express delivery (higher fee)"
+					},
+					"response": []
+				},
+				{
+					"name": "Create Sale with Custom Delivery Fee",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"locationId\": \"{{locationId}}\",\n  \"items\": [\n    {\n      \"type\": \"flexi\",\n      \"productId\": \"{{productId}}\",\n      \"quantity\": 3,\n      \"unitPrice\": 75.00,\n      \"taxAmount\": 36.00\n    }\n  ],\n  \"paymentMethod\": \"mpesa\",\n  \"deliveryInfo\": {\n    \"requiresDelivery\": true,\n    \"feeType\": \"custom\",\n    \"customAmount\": 30.00,\n    \"isTaxable\": false,\n    \"recipientName\": \"Bob Remote\",\n    \"recipientPhone\": \"+254723456789\",\n    \"deliveryAddress\": {\n      \"street\": \"789 Far Away Road\",\n      \"city\": \"Kisumu\",\n      \"country\": \"Kenya\"\n    },\n    \"notes\": \"Long-distance delivery to western region\"\n  }\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/sales",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"sales"
+							]
+						},
+						"description": "Create a sale with custom delivery fee (e.g., for special delivery zones)"
+					},
+					"response": []
+				},
+				{
+					"name": "Create Sale WITHOUT Delivery",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"locationId\": \"{{locationId}}\",\n  \"items\": [\n    {\n      \"type\": \"flexi\",\n      \"productId\": \"{{productId}}\",\n      \"quantity\": 1,\n      \"unitPrice\": 25.00,\n      \"taxAmount\": 4.00\n    }\n  ],\n  \"paymentMethod\": \"cash\",\n  \"notes\": \"Customer pickup - no delivery\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/sales",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"sales"
+							]
+						},
+						"description": "Regular sale without delivery (for comparison)"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Sale Details (with delivery)",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/sales/{{saleId}}",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"sales",
+								"{{saleId}}"
+							]
+						},
+						"description": "Get sale details including delivery fee information"
+					},
+					"response": []
+				}
+			]
+		}
+	],
+	"variable": [
+		{
+			"key": "baseUrl",
+			"value": "http://localhost:9200",
+			"type": "string"
+		},
+		{
+			"key": "accessToken",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "locationId",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "deliveryFeeId",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "trackingNumber",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "driverId",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "saleId",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "productId",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "categoryId",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "optionId",
+			"value": "",
+			"type": "string"
+		}
+	]
+}
