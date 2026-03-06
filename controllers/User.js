@@ -20,6 +20,38 @@ const { loginLimiter, registrationLimiter, refreshLimiter, passwordResetLimiter 
 
 const saltRounds = Number(process.env.SALT) || 10;
 
+const getRefreshCookieOptions = ({ includeMaxAge = true } = {}) => {
+  const configuredSameSite = (process.env.REFRESH_COOKIE_SAMESITE || "").toLowerCase();
+  const sameSite = ["strict", "lax", "none"].includes(configuredSameSite)
+    ? configuredSameSite
+    : process.env.NODE_ENV === "production"
+      ? "none"
+      : "lax";
+
+  const configuredSecure = process.env.REFRESH_COOKIE_SECURE;
+  const secure = configuredSecure
+    ? configuredSecure === "true"
+    : sameSite === "none" || process.env.NODE_ENV === "production";
+
+  const options = {
+    httpOnly: true,
+    secure,
+    sameSite,
+    path: "/",
+  };
+
+  if (includeMaxAge) {
+    options.maxAge = 7 * 24 * 60 * 60 * 1000;
+  }
+
+  const cookieDomain = (process.env.REFRESH_COOKIE_DOMAIN || "").trim();
+  if (cookieDomain) {
+    options.domain = cookieDomain;
+  }
+
+  return options;
+};
+
 /**
  * Helper function to generate unique organization slug
  */
@@ -344,12 +376,7 @@ router.post("/login", loginLimiter, extractDeviceId, async (req, res) => {
       );
 
       // Set httpOnly cookie for refresh token
-      res.cookie("refreshToken", refreshToken, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === "production",
-        sameSite: "strict",
-        maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-      });
+      res.cookie("refreshToken", refreshToken, getRefreshCookieOptions());
 
       return res.status(200).json({
         message: "Logged in successfully",
@@ -406,7 +433,7 @@ router.post("/refresh", refreshLimiter, extractDeviceId, verifyRefreshTokenMiddl
     const user = await User.findById(tokenDoc.userId);
 
     if (!user) {
-      return res.status(401).json({ error: "User not found" });
+      return res.status(401).json({ error: "User not found", code: "USER_NOT_FOUND" });
     }
 
     // Check user status
@@ -419,7 +446,7 @@ router.post("/refresh", refreshLimiter, extractDeviceId, verifyRefreshTokenMiddl
 
     // Check device ID matches
     if (tokenDoc.deviceId !== req.deviceId) {
-      return res.status(401).json({ error: "Device ID mismatch" });
+      return res.status(401).json({ error: "Device ID mismatch", code: "DEVICE_ID_MISMATCH" });
     }
 
     // Get user's organization membership for permissions
@@ -430,7 +457,7 @@ router.post("/refresh", refreshLimiter, extractDeviceId, verifyRefreshTokenMiddl
     });
 
     if (!membership) {
-      return res.status(403).json({ error: "No access to organization" });
+      return res.status(403).json({ error: "No access to organization", code: "ORG_ACCESS_REVOKED" });
     }
 
 
@@ -459,12 +486,7 @@ router.post("/refresh", refreshLimiter, extractDeviceId, verifyRefreshTokenMiddl
     );
 
     // Set new refresh token as httpOnly cookie
-    res.cookie("refreshToken", newRefreshToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
+    res.cookie("refreshToken", newRefreshToken, getRefreshCookieOptions());
 
     res.status(200).json({
       accessToken,
@@ -476,7 +498,13 @@ router.post("/refresh", refreshLimiter, extractDeviceId, verifyRefreshTokenMiddl
     });
   } catch (error) {
     console.error("Refresh token error:", error);
-    res.status(401).json({ error: error.message || "Token refresh failed" });
+    const message = error.message || "Token refresh failed";
+    const code = message === "Refresh token expired"
+      ? "REFRESH_TOKEN_EXPIRED"
+      : message === "Invalid refresh token"
+        ? "REFRESH_TOKEN_INVALID"
+        : "REFRESH_ROTATION_FAILED";
+    res.status(401).json({ error: message, code });
   }
 });
 
@@ -504,7 +532,7 @@ router.post("/logout", extractDeviceId, verifyToken, async (req, res) => {
     }
 
     // Clear cookie
-    res.clearCookie("refreshToken");
+    res.clearCookie("refreshToken", getRefreshCookieOptions({ includeMaxAge: false }));
 
     await logTokenEvent(
       req.user.userId,
@@ -831,12 +859,7 @@ router.post("/switch-organization", verifyToken, extractDeviceId, async (req, re
     );
 
     // Set httpOnly cookie
-    res.cookie("refreshToken", refreshToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
+    res.cookie("refreshToken", refreshToken, getRefreshCookieOptions());
 
     // Log organization switch
     await logTokenEvent(

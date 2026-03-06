@@ -55,6 +55,7 @@ const verifyRefreshTokenMiddleware = async (req, res, next) => {
     if (!refreshToken) {
       return res.status(401).json({
         error: "No refresh token provided",
+        code: "REFRESH_TOKEN_MISSING",
       });
     }
 
@@ -81,6 +82,9 @@ const verifyRefreshTokenMiddleware = async (req, res, next) => {
 
     return res.status(401).json({
       error: error.message,
+      code: error.message === "Refresh token expired"
+        ? "REFRESH_TOKEN_EXPIRED"
+        : "REFRESH_TOKEN_INVALID",
     });
   }
 };
@@ -95,6 +99,7 @@ const extractDeviceId = (req, res, next) => {
   if (!deviceId) {
     return res.status(400).json({
       error: "Device ID is required. Please include X-Device-ID header.",
+      code: "DEVICE_ID_REQUIRED",
     });
   }
 
@@ -102,6 +107,7 @@ const extractDeviceId = (req, res, next) => {
   if (deviceId.length < 10 || deviceId.length > 100) {
     return res.status(400).json({
       error: "Invalid device ID format",
+      code: "DEVICE_ID_INVALID_FORMAT",
     });
   }
 
