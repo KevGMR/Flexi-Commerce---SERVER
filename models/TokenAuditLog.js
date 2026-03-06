@@ -58,6 +58,10 @@ const tokenAuditLogSchema = new Schema(
         "attempted_use_revoked_token",
         "security_breach",
         "location_created",
+        "delivery_category_updated",
+        "delivery_category_created",
+        "delivery_option_updated",
+        "delivery_option_created"
       ],
     },
     permission: {

@@ -552,6 +552,19 @@ router.patch("/:id/delivery-categories/:categoryId", verifyToken, async (req, re
     const organizationId = req.user.organizationId;
     const { id, categoryId } = req.params;
     const { categoryName, description, isActive, statusWorkflow } = req.body;
+    const hasUpdatableField =
+      categoryName !== undefined ||
+      description !== undefined ||
+      isActive !== undefined ||
+      statusWorkflow !== undefined;
+
+    if (!hasUpdatableField) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "No updatable category fields provided. Allowed fields: categoryName, description, isActive, statusWorkflow",
+      });
+    }
 
     const location = await Location.findOne({ _id: id, organizationId });
 
@@ -690,7 +703,7 @@ router.post("/:id/delivery-categories/:categoryId/options", verifyToken, async (
   try {
     const organizationId = req.user.organizationId;
     const { id, categoryId } = req.params;
-    const { optionName, price, estimatedDays, isActive } = req.body;
+    const { optionName, price, estimatedDays, isActive, description } = req.body;
 
     // Validate required fields
     if (!optionName || typeof price !== "number" || price < 0) {
@@ -744,6 +757,7 @@ router.post("/:id/delivery-categories/:categoryId/options", verifyToken, async (
       price,
       estimatedDays: estimatedDays || 1,
       isActive: isActive !== undefined ? isActive : true,
+      description: description || "",
     };
 
     category.childOptions.push(newOption);
@@ -784,7 +798,64 @@ router.patch("/:id/delivery-categories/:categoryId/options/:optionId", verifyTok
   try {
     const organizationId = req.user.organizationId;
     const { id, categoryId, optionId } = req.params;
-    const { optionName, price, estimatedDays, isActive } = req.body;
+    const { optionName, price, estimatedDays, isActive, description } = req.body;
+    const hasUpdatableField =
+      optionName !== undefined ||
+      price !== undefined ||
+      estimatedDays !== undefined ||
+      isActive !== undefined ||
+      description !== undefined;
+
+    if (!hasUpdatableField) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "No updatable option fields provided. Allowed fields: optionName, price, estimatedDays, isActive, description",
+      });
+    }
+
+    if (optionName !== undefined && (!optionName || optionName.trim() === "")) {
+      return res.status(400).json({
+        success: false,
+        message: "optionName cannot be empty",
+      });
+    }
+
+    if (
+      price !== undefined &&
+      (typeof price !== "number" || Number.isNaN(price) || price < 0)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "price must be a non-negative number",
+      });
+    }
+
+    if (
+      estimatedDays !== undefined &&
+      (typeof estimatedDays !== "number" ||
+        Number.isNaN(estimatedDays) ||
+        estimatedDays < 0)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "estimatedDays must be a non-negative number",
+      });
+    }
+
+    if (isActive !== undefined && typeof isActive !== "boolean") {
+      return res.status(400).json({
+        success: false,
+        message: "isActive must be a boolean",
+      });
+    }
+
+    if (description !== undefined && typeof description !== "string") {
+      return res.status(400).json({
+        success: false,
+        message: "description must be a string",
+      });
+    }
 
     const location = await Location.findOne({ _id: id, organizationId });
 
@@ -817,11 +888,44 @@ router.patch("/:id/delivery-categories/:categoryId/options/:optionId", verifyTok
       });
     }
 
-    // Update fields
-    if (optionName !== undefined) option.optionName = optionName;
-    if (typeof price === "number" && price >= 0) option.price = price;
-    if (estimatedDays !== undefined) option.estimatedDays = estimatedDays;
-    if (isActive !== undefined) option.isActive = isActive;
+    let changed = false;
+
+    if (optionName !== undefined) {
+      const nextOptionName = optionName.trim();
+      if (option.optionName !== nextOptionName) {
+        option.optionName = nextOptionName;
+        changed = true;
+      }
+    }
+
+    if (price !== undefined && option.price !== price) {
+      option.price = price;
+      changed = true;
+    }
+
+    if (estimatedDays !== undefined && option.estimatedDays !== estimatedDays) {
+      option.estimatedDays = estimatedDays;
+      changed = true;
+    }
+
+    if (isActive !== undefined && option.isActive !== isActive) {
+      option.isActive = isActive;
+      changed = true;
+    }
+
+    if (description !== undefined && (option.description || "") !== description) {
+      option.description = description;
+      changed = true;
+    }
+
+    if (!changed) {
+      return res.status(200).json({
+        success: true,
+        message: "No changes detected for delivery option",
+        option,
+      });
+    }
+
     category.updatedAt = new Date();
 
     await location.save();

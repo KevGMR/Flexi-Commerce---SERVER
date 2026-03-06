@@ -120,6 +120,7 @@ const locationSchema = new Schema(
               min: 0,
             },
             estimatedDays: Number,
+            description: String,
             isActive: {
               type: Boolean,
               default: true,
