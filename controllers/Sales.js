@@ -51,6 +51,32 @@ const getCompletedPaymentsTotal = (payments = []) =>
       .reduce((sum, p) => sum + (Number(p.amount) || 0), 0),
   );
 
+const isDateWithinRange = ({ value, startDate, endDate }) => {
+  const dateValue = normalizePaymentTimestamp(value, null);
+  if (!dateValue) {
+    return false;
+  }
+
+  if (startDate && dateValue < startDate) {
+    return false;
+  }
+
+  if (endDate && dateValue > endDate) {
+    return false;
+  }
+
+  return true;
+};
+
+const normalizePaymentTimestamp = (value, fallback = new Date()) => {
+  if (!value) {
+    return fallback;
+  }
+
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? fallback : parsed;
+};
+
 const userHasLocationAccess = async ({ organizationId, userId, role, locationId }) => {
   if (["Owner", "Manager"].includes(role)) {
     return true;
@@ -437,6 +463,7 @@ const createSale = async (req, res) => {
         amount: Number(p.amount) || 0,
         reference: p.reference || undefined,
         status: p.status || "completed",
+        paidAt: normalizePaymentTimestamp(p.paidAt),
         cardLast4: p.cardLast4 || undefined,
         cardBrand: p.cardBrand || undefined,
       }));
@@ -446,6 +473,7 @@ const createSale = async (req, res) => {
           method: paymentMethod,
           amount: totalAmount,
           status: paymentStatus || "completed",
+          paidAt: new Date(),
         },
       ];
     }
@@ -537,9 +565,20 @@ const createSale = async (req, res) => {
             cardLast4: p.cardLast4 || undefined,
             cardBrand: p.cardBrand || undefined,
             collectedBy: req.user.userId,
-            collectedAt: new Date(),
+            collectedAt: normalizePaymentTimestamp(p.paidAt),
           })),
-          lastPaymentAt: completedPaymentsTotal > 0 ? new Date() : undefined,
+          lastPaymentAt:
+            completedPaymentsTotal > 0
+              ? normalizePaymentTimestamp(
+                  normalizedPayments
+                    .filter((p) => (p.status || "completed") === "completed")
+                    .sort(
+                      (a, b) =>
+                        normalizePaymentTimestamp(b.paidAt).getTime() -
+                        normalizePaymentTimestamp(a.paidAt).getTime(),
+                    )[0]?.paidAt,
+                )
+              : undefined,
           createdBy: req.user.userId,
           updatedBy: req.user.userId,
         });
@@ -864,7 +903,7 @@ const recordSalePayment = async (req, res) => {
           cardLast4: p.cardLast4 || undefined,
           cardBrand: p.cardBrand || undefined,
           collectedBy: sale.cashierId,
-          collectedAt: sale.createdAt || new Date(),
+          collectedAt: normalizePaymentTimestamp(p.paidAt, sale.createdAt || new Date()),
         })),
         createdBy: sale.cashierId,
         updatedBy: userId,
@@ -888,6 +927,8 @@ const recordSalePayment = async (req, res) => {
       });
     }
 
+    const paymentTimestamp = new Date();
+
     const paymentEntry = {
       method,
       amount: paymentAmount,
@@ -896,7 +937,7 @@ const recordSalePayment = async (req, res) => {
       cardLast4: cardLast4 || undefined,
       cardBrand: cardBrand || undefined,
       collectedBy: userId,
-      collectedAt: new Date(),
+      collectedAt: paymentTimestamp,
     };
 
     receivable.payments.push(paymentEntry);
@@ -930,6 +971,7 @@ const recordSalePayment = async (req, res) => {
       amount: paymentAmount,
       reference: reference || undefined,
       status,
+      paidAt: paymentTimestamp,
       cardLast4: cardLast4 || undefined,
       cardBrand: cardBrand || undefined,
     });
@@ -1178,6 +1220,7 @@ const listSales = async (req, res) => {
       paymentMethod,
       startDate,
       endDate,
+      timeBasis,
       receiptNumber,
       idempotencyKey,
       search,
@@ -1258,10 +1301,14 @@ const listSales = async (req, res) => {
       filter.paymentStatus = req.query.paymentStatus;
     }
 
-    if (startDate || endDate) {
+    const requestedTimeBasis = timeBasis === "payment" ? "payment" : "sale";
+    const startDateObj = startDate ? new Date(startDate) : null;
+    const endDateObj = endDate ? new Date(endDate) : null;
+
+    if (requestedTimeBasis === "sale" && (startDateObj || endDateObj)) {
       filter.createdAt = {};
-      if (startDate) filter.createdAt.$gte = new Date(startDate);
-      if (endDate) filter.createdAt.$lte = new Date(endDate);
+      if (startDateObj) filter.createdAt.$gte = startDateObj;
+      if (endDateObj) filter.createdAt.$lte = endDateObj;
     }
 
     // Delivery category and status filtering
@@ -1277,14 +1324,112 @@ const listSales = async (req, res) => {
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
-    const sales = await Sale.find(filter)
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(parseInt(limit))
-      .select("-inventoryUpdates -shopifySyncLog") // Exclude large arrays in list
-      .lean();
+    let sales = [];
+    let total = 0;
 
-    const total = await Sale.countDocuments(filter);
+    if (requestedTimeBasis === "payment") {
+      const allSales = await Sale.find(filter)
+        .sort({ createdAt: -1 })
+        .select("-inventoryUpdates -shopifySyncLog")
+        .lean();
+
+      const paymentTimeRows = allSales
+        .map((sale) => {
+          const salePayments = Array.isArray(sale.payments) ? sale.payments : [];
+
+          const matchedPayments = salePayments.filter((payment) => {
+            if ((payment.status || "completed") !== "completed") {
+              return false;
+            }
+
+            if (paymentMethod && payment.method !== paymentMethod) {
+              return false;
+            }
+
+            return isDateWithinRange({
+              value: payment.paidAt || sale.createdAt,
+              startDate: startDateObj,
+              endDate: endDateObj,
+            });
+          });
+
+          const hasLegacySinglePayment = salePayments.length === 0;
+          const legacyInRange = hasLegacySinglePayment
+            ? isDateWithinRange({
+                value: sale.createdAt,
+                startDate: startDateObj,
+                endDate: endDateObj,
+              })
+            : false;
+
+          if (matchedPayments.length === 0 && !legacyInRange) {
+            return null;
+          }
+
+          let amountPaidInRange = 0;
+          let lastPaymentAtInRange = null;
+          let paymentMethodsInRange = [];
+
+          if (matchedPayments.length > 0) {
+            amountPaidInRange = roundMoney(
+              matchedPayments.reduce(
+                (sum, payment) => sum + (Number(payment.amount) || 0),
+                0,
+              ),
+            );
+
+            const paymentDates = matchedPayments
+              .map((payment) => normalizePaymentTimestamp(payment.paidAt, sale.createdAt))
+              .filter(Boolean);
+
+            if (paymentDates.length > 0) {
+              lastPaymentAtInRange = paymentDates
+                .sort((a, b) => b.getTime() - a.getTime())[0]
+                .toISOString();
+            }
+
+            paymentMethodsInRange = [
+              ...new Set(matchedPayments.map((payment) => payment.method).filter(Boolean)),
+            ];
+          } else {
+            amountPaidInRange = Number(sale.totalAmount) || 0;
+            lastPaymentAtInRange = normalizePaymentTimestamp(sale.createdAt).toISOString();
+            paymentMethodsInRange = sale.paymentMethod ? [sale.paymentMethod] : [];
+          }
+
+          return {
+            ...sale,
+            amountPaidInRange,
+            lastPaymentAtInRange,
+            paymentMethodsInRange,
+          };
+        })
+        .filter(Boolean)
+        .sort((a, b) => {
+          const aTime = normalizePaymentTimestamp(
+            a.lastPaymentAtInRange,
+            a.createdAt,
+          ).getTime();
+          const bTime = normalizePaymentTimestamp(
+            b.lastPaymentAtInRange,
+            b.createdAt,
+          ).getTime();
+
+          return bTime - aTime;
+        });
+
+      total = paymentTimeRows.length;
+      sales = paymentTimeRows.slice(skip, skip + parseInt(limit));
+    } else {
+      sales = await Sale.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .select("-inventoryUpdates -shopifySyncLog")
+        .lean();
+
+      total = await Sale.countDocuments(filter);
+    }
 
     res.json({
       success: true,
@@ -1519,52 +1664,191 @@ const refundSale = async (req, res) => {
 const getSalesSummary = async (req, res) => {
   try {
     const { organizationId } = req.user;
-    const { locationId, startDate, endDate } = req.query;
+    const {
+      locationId,
+      startDate,
+      endDate,
+      status,
+      paymentMethod,
+      paymentStatus,
+      shopifySyncStatus,
+      timeBasis,
+    } = req.query;
 
-    const filter = { organizationId, status: "completed" };
+    const requestedTimeBasis =
+      timeBasis === "payment" ? "payment" : "sale";
+
+    const startDateObj = startDate ? new Date(startDate) : null;
+    const endDateObj = endDate ? new Date(endDate) : null;
+
+    const filter = { organizationId };
+    filter.status = status || "completed";
 
     if (locationId) filter.locationId = locationId;
+    if (paymentStatus) filter.paymentStatus = paymentStatus;
+    if (shopifySyncStatus) filter.shopifySyncStatus = shopifySyncStatus;
 
-    if (startDate || endDate) {
-      filter.createdAt = {};
-      if (startDate) filter.createdAt.$gte = new Date(startDate);
-      if (endDate) filter.createdAt.$lte = new Date(endDate);
+    if (paymentMethod) {
+      filter.$or = [{ paymentMethod }, { "payments.method": paymentMethod }];
     }
 
-    const sales = await Sale.find(filter).lean();
+    if (requestedTimeBasis === "sale" && (startDateObj || endDateObj)) {
+      filter.createdAt = {};
+      if (startDateObj) filter.createdAt.$gte = startDateObj;
+      if (endDateObj) filter.createdAt.$lte = endDateObj;
+    }
+
+    const sales = await Sale.find(filter)
+      .select(
+        "totalAmount deliveryFeeAmount taxAmount discountAmount items payments paymentMethod createdAt",
+      )
+      .lean();
 
     let totalRevenue = 0;
     let totalTax = 0;
     let totalDiscount = 0;
+    let deliveryAmountCollected = 0;
+    let deliverySalesCount = 0;
     let fleximCount = 0;
     let shopifyCount = 0;
+    let transactionCount = 0;
 
-    for (const sale of sales) {
-      totalRevenue += sale.totalAmount;
-      totalTax += sale.taxAmount;
-      totalDiscount += sale.discountAmount;
+    if (requestedTimeBasis === "payment") {
+      for (const sale of sales) {
+        const salePayments = Array.isArray(sale.payments) ? sale.payments : [];
 
-      for (const item of sale.items) {
-        if (item.type === "flexi") fleximCount += item.quantity;
-        else if (item.type === "shopify") shopifyCount += item.quantity;
+        const matchedPayments = salePayments.filter((payment) => {
+          if ((payment.status || "completed") !== "completed") {
+            return false;
+          }
+
+          if (paymentMethod && payment.method !== paymentMethod) {
+            return false;
+          }
+
+          return isDateWithinRange({
+            value: payment.paidAt || sale.createdAt,
+            startDate: startDateObj,
+            endDate: endDateObj,
+          });
+        });
+
+        const matchedAmount = roundMoney(
+          matchedPayments.reduce((sum, payment) => sum + (Number(payment.amount) || 0), 0),
+        );
+
+        if (matchedPayments.length === 0 && salePayments.length === 0) {
+          const legacyMethod = sale.paymentMethod;
+          const methodMatches = !paymentMethod || legacyMethod === paymentMethod;
+          const legacyInRange = isDateWithinRange({
+            value: sale.createdAt,
+            startDate: startDateObj,
+            endDate: endDateObj,
+          });
+
+          if (methodMatches && legacyInRange) {
+            const legacyAmount = Number(sale.totalAmount) || 0;
+            const legacyDeliveryAmount = Number(sale.deliveryFeeAmount) || 0;
+            totalRevenue += legacyAmount;
+            totalTax += Number(sale.taxAmount) || 0;
+            totalDiscount += Number(sale.discountAmount) || 0;
+            deliveryAmountCollected += legacyDeliveryAmount;
+            if (legacyDeliveryAmount > 0) {
+              deliverySalesCount += 1;
+            }
+            transactionCount += 1;
+
+            for (const item of sale.items || []) {
+              if (item.type === "flexi") fleximCount += Number(item.quantity) || 0;
+              else if (item.type === "shopify")
+                shopifyCount += Number(item.quantity) || 0;
+            }
+          }
+
+          continue;
+        }
+
+        if (matchedAmount <= 0) {
+          continue;
+        }
+
+        const completedTotal = getCompletedPaymentsTotal(salePayments);
+        const allocationRatio =
+          completedTotal > 0
+            ? Math.min(1, roundMoney(matchedAmount / completedTotal))
+            : 0;
+        const saleDeliveryAmount = Number(sale.deliveryFeeAmount) || 0;
+        const allocatedDeliveryAmount = saleDeliveryAmount * allocationRatio;
+
+        totalRevenue += matchedAmount;
+        totalTax += (Number(sale.taxAmount) || 0) * allocationRatio;
+        totalDiscount += (Number(sale.discountAmount) || 0) * allocationRatio;
+        deliveryAmountCollected += allocatedDeliveryAmount;
+        if (saleDeliveryAmount > 0) {
+          deliverySalesCount += 1;
+        }
+        transactionCount += matchedPayments.length;
+
+        for (const item of sale.items || []) {
+          const allocatedQty = (Number(item.quantity) || 0) * allocationRatio;
+          if (item.type === "flexi") fleximCount += allocatedQty;
+          else if (item.type === "shopify") shopifyCount += allocatedQty;
+        }
+      }
+    } else {
+      for (const sale of sales) {
+        const saleDeliveryAmount = Number(sale.deliveryFeeAmount) || 0;
+        totalRevenue += Number(sale.totalAmount) || 0;
+        totalTax += Number(sale.taxAmount) || 0;
+        totalDiscount += Number(sale.discountAmount) || 0;
+        deliveryAmountCollected += saleDeliveryAmount;
+        if (saleDeliveryAmount > 0) {
+          deliverySalesCount += 1;
+        }
+        transactionCount += 1;
+
+        for (const item of sale.items || []) {
+          if (item.type === "flexi") fleximCount += Number(item.quantity) || 0;
+          else if (item.type === "shopify") shopifyCount += Number(item.quantity) || 0;
+        }
       }
     }
+
+    totalRevenue = roundMoney(totalRevenue);
+    totalTax = roundMoney(totalTax);
+    totalDiscount = roundMoney(totalDiscount);
+    deliveryAmountCollected = roundMoney(deliveryAmountCollected);
+    const roundedFlexiCount = Math.round(fleximCount);
+    const roundedShopifyCount = Math.round(shopifyCount);
 
     res.json({
       success: true,
       data: {
-        totalSales: sales.length,
+        totalSales: transactionCount,
         totalRevenue,
         totalTax,
         totalDiscount,
+        deliveryAmountCollected,
+        deliverySalesCount,
+        deliveryAmountShareOfRevenue:
+          totalRevenue > 0
+            ? roundMoney((deliveryAmountCollected / totalRevenue) * 100)
+            : 0,
         averageTransactionValue:
-          sales.length > 0 ? totalRevenue / sales.length : 0,
+          transactionCount > 0 ? roundMoney(totalRevenue / transactionCount) : 0,
         itemsSold: {
-          flexi: fleximCount,
-          shopify: shopifyCount,
-          total: fleximCount + shopifyCount,
+          flexi: roundedFlexiCount,
+          shopify: roundedShopifyCount,
+          total: roundedFlexiCount + roundedShopifyCount,
         },
-        paymentMethodBreakdown: await getPaymentMethodBreakdown(filter),
+        timeBasis: requestedTimeBasis,
+        paymentMethodBreakdown: await getPaymentMethodBreakdown({
+          filter,
+          timeBasis: requestedTimeBasis,
+          startDate: startDateObj,
+          endDate: endDateObj,
+          paymentMethod,
+        }),
       },
     });
   } catch (error) {
@@ -1580,8 +1864,13 @@ const getSalesSummary = async (req, res) => {
 /**
  * Helper: Get payment method breakdown
  */
-async function getPaymentMethodBreakdown(filter) {
-  // Fetch minimal fields for computation
+async function getPaymentMethodBreakdown({
+  filter,
+  timeBasis = "sale",
+  startDate,
+  endDate,
+  paymentMethod,
+}) {
   const sales = await Sale.find(filter)
     .select("paymentMethod payments totalAmount")
     .lean();
@@ -1595,13 +1884,47 @@ async function getPaymentMethodBreakdown(filter) {
     map[method].total += amount;
   };
 
-  for (const s of sales) {
-    if (s.payments && Array.isArray(s.payments) && s.payments.length > 0) {
-      for (const p of s.payments) {
-        add(p.method, Number(p.amount) || 0);
+  for (const sale of sales) {
+    if (sale.payments && Array.isArray(sale.payments) && sale.payments.length > 0) {
+      for (const payment of sale.payments) {
+        if ((payment.status || "completed") !== "completed") {
+          continue;
+        }
+
+        if (paymentMethod && payment.method !== paymentMethod) {
+          continue;
+        }
+
+        if (
+          timeBasis === "payment" &&
+          !isDateWithinRange({
+            value: payment.paidAt || sale.createdAt,
+            startDate,
+            endDate,
+          })
+        ) {
+          continue;
+        }
+
+        add(payment.method, Number(payment.amount) || 0);
       }
     } else {
-      add(s.paymentMethod, Number(s.totalAmount) || 0);
+      if (
+        timeBasis === "payment" &&
+        !isDateWithinRange({
+          value: sale.createdAt,
+          startDate,
+          endDate,
+        })
+      ) {
+        continue;
+      }
+
+      if (paymentMethod && sale.paymentMethod !== paymentMethod) {
+        continue;
+      }
+
+      add(sale.paymentMethod, Number(sale.totalAmount) || 0);
     }
   }
 

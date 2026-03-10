@@ -188,6 +188,10 @@ const saleSchema = new mongoose.Schema(
           enum: ["completed", "pending", "failed"],
           default: "completed",
         },
+        paidAt: {
+          type: Date,
+          default: Date.now,
+        },
         cardLast4: String,
         cardBrand: String,
       },

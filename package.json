@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "nodemon index.js",
     "salt": "nodemon crypto.js",
-    "start": "node index.js"
+    "start": "node index.js",
+    "backfill:sale-payment-timestamps": "node scripts/backfill-sale-payment-timestamps.js",
+    "backfill:sale-payment-timestamps:apply": "node scripts/backfill-sale-payment-timestamps.js --apply"
   },
   "keywords": [],
   "author": "",
