@@ -13,6 +13,8 @@ const { logTokenEvent } = require("../services/auditLogger");
 const { sendOrganizationInvitation } = require("../services/emailNotifier");
 const { loginLimiter } = require("../middleware/rateLimiter");
 
+const VALID_TAX_MODES = ["inclusive", "exclusive"];
+
 /**
  * Get current organization details
  * GET /organizations/:organizationId
@@ -66,9 +68,35 @@ router.put("/:organizationId", verifyToken, async (req, res) => {
       });
     }
 
-    const org = await Organization.findByIdAndUpdate(
+    const org = await Organization.findById(req.params.organizationId);
+    if (!org) {
+      return res.status(404).json({ error: "Organization not found" });
+    }
+
+    if (
+      settings &&
+      settings.taxMode !== undefined &&
+      !VALID_TAX_MODES.includes(settings.taxMode)
+    ) {
+      return res.status(400).json({
+        error: "Invalid taxMode. Allowed values: inclusive, exclusive",
+      });
+    }
+
+    const updateDoc = {};
+    if (name !== undefined) {
+      updateDoc.name = name;
+    }
+    if (settings !== undefined) {
+      updateDoc.settings = {
+        ...(org.settings || {}),
+        ...settings,
+      };
+    }
+
+    const updatedOrg = await Organization.findByIdAndUpdate(
       req.params.organizationId,
-      { name, settings },
+      updateDoc,
       { new: true, runValidators: true },
     );
 
@@ -85,7 +113,7 @@ router.put("/:organizationId", verifyToken, async (req, res) => {
 
     return res.status(200).json({
       message: "Organization updated successfully",
-      organization: org,
+      organization: updatedOrg,
     });
   } catch (error) {
     console.error("Error updating organization:", error);

@@ -30,6 +30,11 @@ const organizationSchema = new Schema(
       currency: { type: String, default: "KES" },
       language: { type: String, default: "en" },
       taxRate: { type: Number, default: 0 },
+      taxMode: {
+        type: String,
+        enum: ["inclusive", "exclusive"],
+        default: "inclusive",
+      },
     },
     // Website builder placeholder
     website: {
@@ -68,6 +73,10 @@ const organizationSchema = new Schema(
         phone: String,
         email: String,
         taxRate: Number,
+        taxMode: {
+          type: String,
+          enum: ["inclusive", "exclusive"],
+        },
         taxId: String,
         currency: { type: String, default: "USD" },
         isDefault: { type: Boolean, default: false },

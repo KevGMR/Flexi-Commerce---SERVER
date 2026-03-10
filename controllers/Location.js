@@ -8,6 +8,8 @@ const { logTokenEvent } = require("../services/auditLogger");
 const axios = require("axios");
 const { getAccessToken } = require("../data/shopifyAuth");
 
+const VALID_TAX_MODES = ["inclusive", "exclusive"];
+
 /**
  * Create location
  * POST /locations
@@ -15,7 +17,19 @@ const { getAccessToken } = require("../data/shopifyAuth");
 router.post("/", verifyToken, async (req, res) => {
   try {
     const organizationId = req.user.organizationId;
-    const { name, locationType, address, phone, email, taxRate, taxId, currency, isDefault, metafieldDefinitions } = req.body;
+    const {
+      name,
+      locationType,
+      address,
+      phone,
+      email,
+      taxRate,
+      taxMode,
+      taxId,
+      currency,
+      isDefault,
+      metafieldDefinitions,
+    } = req.body;
 
     if (!name || !locationType) {
       return res.status(400).json({ error: "name and locationType are required" });
@@ -26,6 +40,14 @@ router.post("/", verifyToken, async (req, res) => {
       await Location.updateMany({ organizationId }, { isDefault: false });
     }
 
+    if (taxMode !== undefined && taxMode !== null && taxMode !== "") {
+      if (!VALID_TAX_MODES.includes(taxMode)) {
+        return res.status(400).json({
+          error: "Invalid taxMode. Allowed values: inclusive, exclusive",
+        });
+      }
+    }
+
     const location = new Location({
       organizationId,
       name,
@@ -34,6 +56,10 @@ router.post("/", verifyToken, async (req, res) => {
       phone,
       email,
       taxRate,
+      taxMode:
+        taxMode === undefined || taxMode === null || taxMode === ""
+          ? undefined
+          : taxMode,
       taxId,
       currency,
       isDefault: isDefault || false,
@@ -107,7 +133,20 @@ router.get("/:id", verifyToken, async (req, res) => {
 router.put("/:id", verifyToken, async (req, res) => {
   try {
     const organizationId = req.user.organizationId;
-    const { name, locationType, address, phone, email, taxRate, taxId, currency, isDefault, status, metafieldDefinitions } = req.body;
+    const {
+      name,
+      locationType,
+      address,
+      phone,
+      email,
+      taxRate,
+      taxMode,
+      taxId,
+      currency,
+      isDefault,
+      status,
+      metafieldDefinitions,
+    } = req.body;
 
     const location = await Location.findOne({ _id: req.params.id, organizationId });
     if (!location) {
@@ -127,6 +166,17 @@ router.put("/:id", verifyToken, async (req, res) => {
     if (phone !== undefined) location.phone = phone;
     if (email !== undefined) location.email = email;
     if (taxRate !== undefined) location.taxRate = taxRate;
+    if (taxMode !== undefined) {
+      if (taxMode === null || taxMode === "" || taxMode === "inherit") {
+        location.taxMode = undefined;
+      } else if (VALID_TAX_MODES.includes(taxMode)) {
+        location.taxMode = taxMode;
+      } else {
+        return res.status(400).json({
+          error: "Invalid taxMode. Allowed values: inclusive, exclusive",
+        });
+      }
+    }
     if (taxId !== undefined) location.taxId = taxId;
     if (currency) location.currency = currency;
     if (status) location.status = status;

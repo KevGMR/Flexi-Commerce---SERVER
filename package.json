@@ -8,7 +8,9 @@
     "salt": "nodemon crypto.js",
     "start": "node index.js",
     "backfill:sale-payment-timestamps": "node scripts/backfill-sale-payment-timestamps.js",
-    "backfill:sale-payment-timestamps:apply": "node scripts/backfill-sale-payment-timestamps.js --apply"
+    "backfill:sale-payment-timestamps:apply": "node scripts/backfill-sale-payment-timestamps.js --apply",
+    "backfill:sale-tax-config": "node scripts/backfill-sale-tax-config.js",
+    "backfill:sale-tax-config:apply": "node scripts/backfill-sale-tax-config.js --apply"
   },
   "keywords": [],
   "author": "",

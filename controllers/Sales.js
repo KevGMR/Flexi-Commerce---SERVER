@@ -7,6 +7,7 @@ const DeliveryFee = require("../models/DeliveryFee");
 const Receivable = require("../models/Receivable");
 const ShopifyConnection = require("../models/ShopifyConnection");
 const UserOrganization = require("../models/UserOrganization");
+const Organization = require("../models/Organization");
 const {
   updateShopifyInventory,
   queueInventoryUpdate,
@@ -14,6 +15,8 @@ const {
 const Inventory = require("../models/Inventory");
 const { requirePermission } = require("../middleware/permissionCheck");
 const { validateLocationAccess } = require("../middleware/locationAccess");
+
+const VALID_TAX_MODES = ["inclusive", "exclusive"];
 
 const roundMoney = (value) => Math.round((Number(value) || 0) * 100) / 100;
 
@@ -97,6 +100,39 @@ const userHasLocationAccess = async ({ organizationId, userId, role, locationId 
   return membership.locations.some((loc) => String(loc) === String(locationId));
 };
 
+const resolveEffectiveTaxConfig = async ({ organizationId, location }) => {
+  let orgTaxMode = "inclusive";
+
+  const org = await Organization.findById(organizationId)
+    .select("settings.taxMode")
+    .lean();
+
+  if (VALID_TAX_MODES.includes(org?.settings?.taxMode)) {
+    orgTaxMode = org.settings.taxMode;
+  }
+
+  const locationTaxMode = VALID_TAX_MODES.includes(location?.taxMode)
+    ? location.taxMode
+    : null;
+
+  return {
+    taxRate: Number(location?.taxRate) || 0,
+    taxMode: locationTaxMode || orgTaxMode,
+  };
+};
+
+const calculateLineTax = ({ taxableAmount, taxRate, taxMode }) => {
+  if (taxRate <= 0 || taxableAmount <= 0) {
+    return 0;
+  }
+
+  if (taxMode === "exclusive") {
+    return taxableAmount * taxRate;
+  }
+
+  return taxableAmount - taxableAmount / (1 + taxRate);
+};
+
 /**
  * POST /sales
  * Create a new sale with items from FLEXI and/or Shopify
@@ -172,7 +208,10 @@ const createSale = async (req, res) => {
       });
     }
 
-    const taxRate = Number(location.taxRate) || 0;
+    const { taxRate, taxMode } = await resolveEffectiveTaxConfig({
+      organizationId,
+      location,
+    });
 
     // Calculate totals
     let subtotal = 0;
@@ -198,8 +237,11 @@ const createSale = async (req, res) => {
         const lineTotal = item.quantity * item.unitPrice;
         const lineDiscount = item.discount || 0;
         const taxableAmount = Math.max(0, lineTotal - lineDiscount);
-        const lineTax =
-          taxRate > 0 ? taxableAmount - taxableAmount / (1 + taxRate) : 0;
+        const lineTax = calculateLineTax({
+          taxableAmount,
+          taxRate,
+          taxMode,
+        });
 
         enrichedItems.push({
           type: "flexi",
@@ -229,8 +271,11 @@ const createSale = async (req, res) => {
         const lineTotal = item.quantity * item.unitPrice;
         const lineDiscount = item.discount || 0;
         const taxableAmount = Math.max(0, lineTotal - lineDiscount);
-        const lineTax =
-          taxRate > 0 ? taxableAmount - taxableAmount / (1 + taxRate) : 0;
+        const lineTax = calculateLineTax({
+          taxableAmount,
+          taxRate,
+          taxMode,
+        });
 
         enrichedItems.push({
           type: "shopify",
@@ -255,7 +300,14 @@ const createSale = async (req, res) => {
       }
     }
 
+    subtotal = roundMoney(subtotal);
+    totalTax = roundMoney(totalTax);
+    totalDiscount = roundMoney(totalDiscount);
+
     let totalAmount = subtotal - totalDiscount;
+    if (taxMode === "exclusive") {
+      totalAmount += totalTax;
+    }
 
     // Handle delivery fee if provided
     let deliveryFee = null;
@@ -520,6 +572,8 @@ const createSale = async (req, res) => {
         subtotal,
         discountAmount: totalDiscount,
         taxAmount: totalTax,
+        taxMode,
+        taxRateUsed: taxRate,
         totalAmount,
         deliveryFeeAmount: deliveryFeeAmount || 0,
         requiresDelivery: deliveryInfo?.requiresDelivery || false,
@@ -644,6 +698,8 @@ const createSale = async (req, res) => {
           deliveryFeeId: createdDeliveryFee?._id,
           trackingNumber: createdDeliveryFee?.trackingNumber,
           status: sale.status,
+          taxMode: sale.taxMode,
+          taxRateUsed: sale.taxRateUsed,
           paymentStatus: sale.paymentStatus,
           amountPaid: completedPaymentsTotal,
           balanceDue: initialBalanceDue,
@@ -1700,7 +1756,7 @@ const getSalesSummary = async (req, res) => {
 
     const sales = await Sale.find(filter)
       .select(
-        "totalAmount deliveryFeeAmount taxAmount discountAmount items payments paymentMethod createdAt",
+        "totalAmount deliveryFeeAmount taxAmount discountAmount taxMode items payments paymentMethod createdAt",
       )
       .lean();
 
@@ -1708,10 +1764,52 @@ const getSalesSummary = async (req, res) => {
     let totalTax = 0;
     let totalDiscount = 0;
     let deliveryAmountCollected = 0;
+    let salesAmountExcludingDelivery = 0;
+    let netSalesExcludingTax = 0;
+    let preDiscountSales = 0;
     let deliverySalesCount = 0;
     let fleximCount = 0;
     let shopifyCount = 0;
     let transactionCount = 0;
+
+    const taxModeBreakdown = {
+      inclusive: {
+        transactions: 0,
+        totalRevenue: 0,
+        totalTax: 0,
+      },
+      exclusive: {
+        transactions: 0,
+        totalRevenue: 0,
+        totalTax: 0,
+      },
+    };
+
+    const accumulateSummaryTotals = ({
+      sale,
+      revenueAmount,
+      taxAmount,
+      discountAmount,
+      deliveryAmount,
+      transactionIncrement,
+    }) => {
+      totalRevenue += revenueAmount;
+      totalTax += taxAmount;
+      totalDiscount += discountAmount;
+      deliveryAmountCollected += deliveryAmount;
+
+      const baseSalesAmount = Math.max(0, revenueAmount - deliveryAmount);
+      salesAmountExcludingDelivery += baseSalesAmount;
+
+      const netAmount = Math.max(0, baseSalesAmount - taxAmount);
+      netSalesExcludingTax += netAmount;
+      preDiscountSales += netAmount + discountAmount;
+
+      const mode = sale.taxMode === "exclusive" ? "exclusive" : "inclusive";
+      taxModeBreakdown[mode].transactions += transactionIncrement;
+      taxModeBreakdown[mode].totalRevenue += revenueAmount;
+      taxModeBreakdown[mode].totalTax += taxAmount;
+    };
 
     if (requestedTimeBasis === "payment") {
       for (const sale of sales) {
@@ -1749,10 +1847,18 @@ const getSalesSummary = async (req, res) => {
           if (methodMatches && legacyInRange) {
             const legacyAmount = Number(sale.totalAmount) || 0;
             const legacyDeliveryAmount = Number(sale.deliveryFeeAmount) || 0;
-            totalRevenue += legacyAmount;
-            totalTax += Number(sale.taxAmount) || 0;
-            totalDiscount += Number(sale.discountAmount) || 0;
-            deliveryAmountCollected += legacyDeliveryAmount;
+            const legacyTax = Number(sale.taxAmount) || 0;
+            const legacyDiscount = Number(sale.discountAmount) || 0;
+
+            accumulateSummaryTotals({
+              sale,
+              revenueAmount: legacyAmount,
+              taxAmount: legacyTax,
+              discountAmount: legacyDiscount,
+              deliveryAmount: legacyDeliveryAmount,
+              transactionIncrement: 1,
+            });
+
             if (legacyDeliveryAmount > 0) {
               deliverySalesCount += 1;
             }
@@ -1780,10 +1886,15 @@ const getSalesSummary = async (req, res) => {
         const saleDeliveryAmount = Number(sale.deliveryFeeAmount) || 0;
         const allocatedDeliveryAmount = saleDeliveryAmount * allocationRatio;
 
-        totalRevenue += matchedAmount;
-        totalTax += (Number(sale.taxAmount) || 0) * allocationRatio;
-        totalDiscount += (Number(sale.discountAmount) || 0) * allocationRatio;
-        deliveryAmountCollected += allocatedDeliveryAmount;
+        accumulateSummaryTotals({
+          sale,
+          revenueAmount: matchedAmount,
+          taxAmount: (Number(sale.taxAmount) || 0) * allocationRatio,
+          discountAmount: (Number(sale.discountAmount) || 0) * allocationRatio,
+          deliveryAmount: allocatedDeliveryAmount,
+          transactionIncrement: matchedPayments.length,
+        });
+
         if (saleDeliveryAmount > 0) {
           deliverySalesCount += 1;
         }
@@ -1798,10 +1909,15 @@ const getSalesSummary = async (req, res) => {
     } else {
       for (const sale of sales) {
         const saleDeliveryAmount = Number(sale.deliveryFeeAmount) || 0;
-        totalRevenue += Number(sale.totalAmount) || 0;
-        totalTax += Number(sale.taxAmount) || 0;
-        totalDiscount += Number(sale.discountAmount) || 0;
-        deliveryAmountCollected += saleDeliveryAmount;
+        accumulateSummaryTotals({
+          sale,
+          revenueAmount: Number(sale.totalAmount) || 0,
+          taxAmount: Number(sale.taxAmount) || 0,
+          discountAmount: Number(sale.discountAmount) || 0,
+          deliveryAmount: saleDeliveryAmount,
+          transactionIncrement: 1,
+        });
+
         if (saleDeliveryAmount > 0) {
           deliverySalesCount += 1;
         }
@@ -1818,17 +1934,54 @@ const getSalesSummary = async (req, res) => {
     totalTax = roundMoney(totalTax);
     totalDiscount = roundMoney(totalDiscount);
     deliveryAmountCollected = roundMoney(deliveryAmountCollected);
+    salesAmountExcludingDelivery = roundMoney(salesAmountExcludingDelivery);
+    netSalesExcludingTax = roundMoney(netSalesExcludingTax);
+    preDiscountSales = roundMoney(preDiscountSales);
     const roundedFlexiCount = Math.round(fleximCount);
     const roundedShopifyCount = Math.round(shopifyCount);
+
+    const modeEntries = Object.entries(taxModeBreakdown)
+      .map(([mode, totals]) => ({
+        mode,
+        transactions: totals.transactions,
+        totalRevenue: roundMoney(totals.totalRevenue),
+        totalTax: roundMoney(totals.totalTax),
+      }))
+      .filter((entry) => entry.transactions > 0 || entry.totalRevenue > 0);
+
+    const taxDisplayMode =
+      modeEntries.length > 1
+        ? "mixed"
+        : modeEntries.length === 1
+          ? modeEntries[0].mode
+          : "inclusive";
 
     res.json({
       success: true,
       data: {
         totalSales: transactionCount,
         totalRevenue,
+        salesAmountExcludingDelivery,
+        netSalesExcludingTax,
+        preDiscountSales,
         totalTax,
         totalDiscount,
         deliveryAmountCollected,
+        taxDisplayMode,
+        taxModeBreakdown: {
+          inclusive: modeEntries.find((entry) => entry.mode === "inclusive") || {
+            mode: "inclusive",
+            transactions: 0,
+            totalRevenue: 0,
+            totalTax: 0,
+          },
+          exclusive: modeEntries.find((entry) => entry.mode === "exclusive") || {
+            mode: "exclusive",
+            transactions: 0,
+            totalRevenue: 0,
+            totalTax: 0,
+          },
+        },
         deliverySalesCount,
         deliveryAmountShareOfRevenue:
           totalRevenue > 0

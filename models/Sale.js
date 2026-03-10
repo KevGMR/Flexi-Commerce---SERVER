@@ -99,6 +99,16 @@ const saleSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
+    taxMode: {
+      type: String,
+      enum: ["inclusive", "exclusive"],
+      default: "inclusive",
+    },
+    taxRateUsed: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     totalAmount: {
       type: Number,
       required: true,

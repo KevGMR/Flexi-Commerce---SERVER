@@ -33,6 +33,10 @@ const locationSchema = new Schema(
       type: Number,
       default: 0,
     },
+    taxMode: {
+      type: String,
+      enum: ["inclusive", "exclusive"],
+    },
     taxId: String, // Tax registration ID for this location
     // Currency (for multi-currency support in future)
     currency: {
