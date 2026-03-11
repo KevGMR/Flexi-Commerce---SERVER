@@ -320,6 +320,28 @@ const calculateLineTax = ({ taxableAmount, taxRate, taxMode }) => {
   return taxableAmount - taxableAmount / (1 + taxRate);
 };
 
+const buildShopifySyncSummary = (sale = {}) => {
+  const syncStatus = sale.shopifySyncStatus || "pending";
+  const hasDetailedLog = Array.isArray(sale.shopifySyncLog);
+  const syncLog = hasDetailedLog ? sale.shopifySyncLog : [];
+
+  const retryAttempts = syncLog.filter((entry) =>
+    ["retrying", "failed"].includes(entry?.status),
+  ).length;
+
+  return {
+    orderStatus: sale.status || "pending",
+    syncStatus,
+    retryAttempts,
+    successCount: syncLog.filter((entry) => entry?.status === "success").length,
+    pendingCount: syncLog.filter((entry) => entry?.status === "pending").length,
+    retryingCount: syncLog.filter((entry) => entry?.status === "retrying").length,
+    failedCount: syncLog.filter((entry) => entry?.status === "failed").length,
+    hasDetailedLog,
+    isTerminal: ["synced", "failed"].includes(syncStatus),
+  };
+};
+
 /**
  * POST /sales
  * Create a new sale with items from FLEXI and/or Shopify
@@ -885,6 +907,9 @@ const createSale = async (req, res) => {
           deliveryFeeId: createdDeliveryFee?._id,
           trackingNumber: createdDeliveryFee?.trackingNumber,
           status: sale.status,
+          orderStatus: sale.status,
+          shopifySyncStatus: sale.shopifySyncStatus || "pending",
+          shopifySyncSummary: buildShopifySyncSummary(sale),
           taxMode: sale.taxMode,
           taxRateUsed: sale.taxRateUsed,
           paymentStatus: sale.paymentStatus,
@@ -1652,7 +1677,32 @@ async function processInventoryUpdates(sale, organizationId, session) {
           error.message,
         );
 
-        // Attempt to queue for retry so offline sync can complete later
+        // Permanent failures (e.g. deleted Shopify variant) must not be queued —
+        // they will never succeed regardless of retries. Log and skip immediately.
+        if (error.permanent === true) {
+          console.error(
+            `[Sales] Permanent Shopify sync failure for variant ${item.shopifyVariantId} — not queuing:`,
+            error.message,
+          );
+          sale.inventoryUpdates.push({
+            itemId: i.toString(),
+            type: "shopify",
+            shopifyVariantId: item.shopifyVariantId,
+            quantityDeducted: item.quantity,
+            status: "failed",
+            error: error.message,
+          });
+          failedCount += 1;
+          sale.shopifySyncLog.push({
+            shopifyVariantId: item.shopifyVariantId,
+            itemIndex: i,
+            status: "failed",
+            error: error.message,
+          });
+          continue; // eslint-disable-line no-continue
+        }
+
+        // Transient failure — attempt to queue for retry so sync can complete later
         try {
           await queueInventoryUpdate(
             organizationId,
@@ -1676,7 +1726,7 @@ async function processInventoryUpdates(sale, organizationId, session) {
           sale.shopifySyncLog.push({
             shopifyVariantId: item.shopifyVariantId,
             itemIndex: i,
-            status: "pending",
+            status: "retrying",
             error: error.message,
           });
         } catch (queueError) {
@@ -1742,6 +1792,8 @@ const getSale = async (req, res) => {
 
     const saleData = sale.toObject();
     saleData.effectivePayments = getEffectivePaymentsForSale(saleData);
+    saleData.orderStatus = saleData.status;
+    saleData.shopifySyncSummary = buildShopifySyncSummary(saleData);
 
     res.json({
       success: true,
@@ -1967,6 +2019,12 @@ const listSales = async (req, res) => {
         total = await Sale.countDocuments(filter);
       }
     }
+
+    sales = (sales || []).map((saleItem) => ({
+      ...saleItem,
+      orderStatus: saleItem.status,
+      shopifySyncSummary: buildShopifySyncSummary(saleItem),
+    }));
 
     res.json({
       success: true,
@@ -2656,7 +2714,24 @@ async function reverseInventoryUpdates(sale, organizationId) {
           error.message,
         );
 
-        // Attempt to queue for retry
+        // Permanent failure — variant deleted; no point queuing a restock
+        if (error.permanent === true) {
+          console.error(
+            `[Sales] Permanent Shopify sync failure for variant ${item.shopifyVariantId} (reversal) — not queuing:`,
+            error.message,
+          );
+          sale.inventoryUpdates.push({
+            itemId: i.toString(),
+            type: "shopify",
+            shopifyVariantId: item.shopifyVariantId,
+            quantityDeducted: -item.quantity,
+            status: "failed",
+            error: error.message,
+          });
+          continue; // eslint-disable-line no-continue
+        }
+
+        // Transient failure — attempt to queue for retry
         try {
           await queueInventoryUpdate(
             organizationId,
@@ -2789,7 +2864,22 @@ async function reverseInventoryForItems(sale, organizationId, refundedItems) {
           error.message,
         );
 
-        // Attempt to queue for retry
+        // Permanent failure — variant deleted; no point queuing a restock
+        if (error.permanent === true) {
+          console.error(
+            `[Sales] Permanent Shopify sync failure for variant ${saleItem.shopifyVariantId} (refund reversal) — not queuing:`,
+            error.message,
+          );
+          sale.inventoryUpdates.push({
+            itemId: `refund-${itemIndex}`,
+            type: "shopify",
+            shopifyVariantId: saleItem.shopifyVariantId,
+            quantityDeducted: -quantity,
+            status: "failed",
+            error: error.message,
+          });
+        } else {
+        // Transient failure — attempt to queue for retry
         try {
           await queueInventoryUpdate(
             organizationId,
@@ -2823,6 +2913,7 @@ async function reverseInventoryForItems(sale, organizationId, refundedItems) {
             error: queueError.message,
           });
         }
+        } // end else (transient)
       }
     }
   }

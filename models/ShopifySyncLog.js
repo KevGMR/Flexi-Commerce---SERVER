@@ -31,9 +31,18 @@ const shopifySyncLogSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['success', 'failed', 'pending'],
+    // 'retrying'  = attempt failed but the queue will keep trying (transient error)
+    // 'failed'    = permanent/terminal failure (product/variant deleted on Shopify or Flexi)
+    // 'success'   = completed successfully
+    // 'pending'   = queued, not yet attempted
+    enum: ['success', 'failed', 'pending', 'retrying'],
     required: true,
     index: true
+  },
+  // Whether this failure is permanent (product deleted) vs transient (network/auth/etc.)
+  isPermanent: {
+    type: Boolean,
+    default: false
   },
   requestPayload: {
     type: mongoose.Schema.Types.Mixed

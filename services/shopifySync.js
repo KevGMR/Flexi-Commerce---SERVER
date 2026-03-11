@@ -197,6 +197,27 @@ function getMatchedInventoryLevel(inventoryLevels, shopifyLocationId) {
 }
 
 /**
+ * Determines whether a Shopify sync failure is permanent (non-retryable).
+ *
+ * Only product/variant deletion on Shopify or Flexi qualifies as permanent.
+ * Everything else — auth errors, rate-limits, network failures, missing inventory
+ * locations, or unexpected GraphQL errors — is treated as transient and will keep
+ * being retried by the queue worker.
+ *
+ * @param {Error} error
+ * @returns {boolean}
+ */
+function isPermanentError(error) {
+  // Caller attached an explicit marker (e.g. VARIANT_NOT_FOUND check below)
+  if (error?.permanent === true) return true;
+
+  // Shopify userErrors that unambiguously mean the resource is gone
+  if (error?.code === 'VARIANT_NOT_FOUND' || error?.code === 'PRODUCT_NOT_FOUND') return true;
+
+  return false;
+}
+
+/**
  * Update inventory in Shopify
  * @param {String} organizationId - Organization ID
  * @param {String} shopifyVariantId - Shopify variant ID
@@ -248,6 +269,14 @@ async function updateShopifyInventory(organizationId, shopifyVariantId, quantity
 
     if (inventoryResult.errors) {
       throw new Error(`Shopify errors: ${JSON.stringify(inventoryResult.errors)}`);
+    }
+
+    // Variant does not exist on Shopify (deleted or never created) — permanent failure
+    if (inventoryResult.data.productVariant === null) {
+      const err = new Error(`Shopify variant ${shopifyVariantId} not found or has been deleted`);
+      err.permanent = true;
+      err.code = 'VARIANT_NOT_FOUND';
+      throw err;
     }
 
     const inventoryItem = inventoryResult.data.productVariant?.inventoryItem;
@@ -335,13 +364,17 @@ async function updateShopifyInventory(organizationId, shopifyVariantId, quantity
   } catch (error) {
     console.error('Shopify inventory update error:', error);
 
-    // Log failed sync
+    const permanent = isPermanentError(error);
+
+    // Permanent failures (deleted variant/product) are logged as 'failed'.
+    // Transient failures are logged as 'retrying' — the queue worker will keep attempting.
     await ShopifySyncLog.create({
       organizationId,
       syncType: 'inventory_update',
       shopifyVariantId,
       saleId,
-      status: 'failed',
+      status: permanent ? 'failed' : 'retrying',
+      isPermanent: permanent,
       errorMessage: error.message,
       errorCode: error.code || 'UNKNOWN',
       processingTime: Date.now() - startTime,
@@ -431,6 +464,14 @@ async function processQueueItem(queueItem) {
 
     if (inventoryResult.errors) {
       throw new Error(`Shopify errors: ${JSON.stringify(inventoryResult.errors)}`);
+    }
+
+    // Variant does not exist on Shopify (deleted or never created) — permanent failure
+    if (inventoryResult.data.productVariant === null) {
+      const err = new Error(`Shopify variant ${queueItem.shopifyVariantId} not found or has been deleted`);
+      err.permanent = true;
+      err.code = 'VARIANT_NOT_FOUND';
+      throw err;
     }
 
     const inventoryItem = inventoryResult.data.productVariant?.inventoryItem;
@@ -531,6 +572,8 @@ async function processQueueItem(queueItem) {
   } catch (error) {
     console.error('Process queue item error:', error);
 
+    const permanent = isPermanentError(error);
+
     // Increment attempt count
     queueItem.attemptCount += 1;
     queueItem.lastError = {
@@ -539,26 +582,31 @@ async function processQueueItem(queueItem) {
       occurredAt: new Date(),
     };
 
-    // Check if max attempts reached
-    if (queueItem.attemptCount >= queueItem.maxAttempts) {
+    if (permanent) {
+      // Permanent failure (e.g. variant deleted): stop retrying immediately
+      queueItem.status = 'needs_review';
+      queueItem.needsReview = true;
+    } else if (queueItem.attemptCount >= queueItem.maxAttempts) {
+      // Exhausted all attempts on a transient error: flag for manual review
       queueItem.status = 'needs_review';
       queueItem.needsReview = true;
     } else {
-      // Calculate next retry time with exponential backoff
-      const backoffMinutes = Math.pow(2, queueItem.attemptCount); // 1, 2, 4, 8, 16, 32, 64, 128, 256, 512 minutes
+      // Transient error with attempts remaining: exponential backoff and retry
+      const backoffMinutes = Math.pow(2, queueItem.attemptCount); // 2, 4, 8, 16 … 512 minutes
       queueItem.nextRetryAt = new Date(Date.now() + backoffMinutes * 60 * 1000);
       queueItem.status = 'failed';
     }
 
     await queueItem.save();
 
-    // Log failure
+    // Permanent failures log as 'failed'; transient attempts log as 'retrying'
     await ShopifySyncLog.create({
       organizationId: queueItem.organizationId,
       syncType: 'inventory_update',
       shopifyVariantId: queueItem.shopifyVariantId,
       saleId: queueItem.saleId,
-      status: 'failed',
+      status: permanent ? 'failed' : 'retrying',
+      isPermanent: permanent,
       errorMessage: error.message,
       errorCode: error.code || 'UNKNOWN',
       attemptNumber: queueItem.attemptCount,
@@ -566,7 +614,10 @@ async function processQueueItem(queueItem) {
     });
 
     if (queueItem.saleId) {
-      const saleStatus = queueItem.status === 'needs_review' ? 'failed' : 'pending';
+      // Only mark the sale as 'failed' for permanent errors (deleted product).
+      // Transient/exhausted errors leave the sale as 'pending' so the queue
+      // status (needs_review) tells the full story without alarming operators.
+      const saleStatus = permanent ? 'failed' : 'pending';
 
       await Sale.updateOne(
         { _id: queueItem.saleId },
@@ -575,7 +626,7 @@ async function processQueueItem(queueItem) {
           $push: {
             shopifySyncLog: {
               shopifyVariantId: queueItem.shopifyVariantId,
-              status: 'failed',
+              status: permanent ? 'failed' : 'retrying',
               error: error.message,
               timestamp: new Date(),
             },
@@ -584,7 +635,7 @@ async function processQueueItem(queueItem) {
       );
     }
 
-    return { success: false, error: error.message };
+    return { success: false, error: error.message, permanent };
   }
 }
 
@@ -633,6 +684,13 @@ async function syncInventoryOnSale(organizationId, shopifyProductId, shopifyVari
       ...result,
     };
   } catch (error) {
+    // Permanent failures (deleted variant/product) must not be queued — they will
+    // never succeed and should surface immediately as terminal errors.
+    if (isPermanentError(error)) {
+      console.error('[Shopify Sync] Permanent failure — not queuing for retry:', error.message);
+      throw error;
+    }
+
     console.error('Immediate sync failed, queuing for retry:', error);
 
     // Queue for retry
@@ -661,4 +719,5 @@ module.exports = {
   processQueueItem,
   processRetryQueue,
   syncInventoryOnSale,
+  isPermanentError,
 };

@@ -310,7 +310,9 @@ const saleSchema = new mongoose.Schema(
         itemIndex: Number,
         status: {
           type: String,
-          enum: ["pending", "success", "failed"],
+          // 'retrying' = queued for retry (transient failure)
+          // 'failed'   = permanent failure (variant deleted)
+          enum: ["pending", "success", "failed", "retrying"],
         },
         error: String,
         timestamp: {

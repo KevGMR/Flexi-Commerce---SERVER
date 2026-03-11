@@ -3,6 +3,8 @@ const ShopifySyncLog = require('../models/ShopifySyncLog');
 const ShopifySyncQueue = require('../models/ShopifySyncQueue');
 const Location = require('../models/Location');
 const { getAccessToken, clearTokenCache } = require('../data/shopifyAuth');
+const { processQueueItem } = require('../services/shopifySync');
+const retryWorker = require('../workers/shopifyRetryWorker');
 const crypto = require('crypto');
 const axios = require('axios');
 const express = require('express');
@@ -864,6 +866,101 @@ const getSyncQueue = async (req, res) => {
 };
 
 /**
+ * POST /shopify/sync-queue/process
+ * Manually trigger the retry worker to process all eligible queued items immediately.
+ * Useful when you don't want to wait for the next 5-minute cron tick.
+ */
+const processSyncQueue = async (req, res) => {
+  try {
+    const result = await retryWorker.runNow();
+
+    if (!result.success) {
+      return res.status(409).json({
+        success: false,
+        message: result.message || 'Queue processor is already running',
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `Processed ${result.processed} queued item(s)`,
+      data: {
+        processed: result.processed,
+        duration: result.duration,
+        timestamp: result.timestamp,
+      },
+    });
+  } catch (error) {
+    console.error('Process sync queue error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to process sync queue',
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * POST /shopify/sync-queue/:queueId/retry
+ * Immediately retry a single queue item by ID.
+ * Only works on items with status 'failed', 'pending', or 'needs_review'.
+ */
+const retrySyncQueueItem = async (req, res) => {
+  try {
+    const { organizationId } = req.user;
+    const { queueId } = req.params;
+
+    const item = await ShopifySyncQueue.findOne({ _id: queueId, organizationId });
+
+    if (!item) {
+      return res.status(404).json({
+        success: false,
+        message: 'Queue item not found',
+      });
+    }
+
+    if (item.status === 'completed') {
+      return res.status(400).json({
+        success: false,
+        message: 'Queue item is already completed',
+      });
+    }
+
+    if (item.status === 'processing') {
+      return res.status(409).json({
+        success: false,
+        message: 'Queue item is currently being processed',
+      });
+    }
+
+    // Reset so it can be retried regardless of nextRetryAt or needsReview
+    item.status = 'pending';
+    item.needsReview = false;
+    item.nextRetryAt = new Date();
+    await item.save();
+
+    const result = await processQueueItem(item);
+
+    res.json({
+      success: true,
+      message: result.success ? 'Retry succeeded' : 'Retry failed — item re-queued',
+      data: {
+        queueId,
+        success: result.success,
+        ...(result.error ? { error: result.error, permanent: result.permanent } : {}),
+      },
+    });
+  } catch (error) {
+    console.error('Retry sync queue item error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to retry queue item',
+      error: error.message,
+    });
+  }
+};
+
+/**
  * GET /shopify/sync-logs
  * Get sync history
  */
@@ -901,6 +998,8 @@ router.delete('/disconnect', disconnect);
 router.get('/connection', getConnection);
 router.get('/products', getProducts);
 router.get('/sync-queue', getSyncQueue);
+router.post('/sync-queue/process', processSyncQueue);         // manual trigger
+router.post('/sync-queue/:queueId/retry', retrySyncQueueItem); // single-item retry
 router.get('/sync-logs', getSyncLogs);
 
 // Webhooks: need raw body for HMAC verification
