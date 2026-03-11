@@ -19,6 +19,7 @@ const { validateLocationAccess } = require("../middleware/locationAccess");
 
 const VALID_TAX_MODES = ["inclusive", "exclusive"];
 const PAYMENT_METHODS = ["cash", "card", "mobile", "check", "credit", "mpesa"];
+const INTERNAL_CREDIT_PAYMENT_METHODS = new Set(["credit"]);
 
 const roundMoney = (value) => Math.round((Number(value) || 0) * 100) / 100;
 
@@ -55,6 +56,33 @@ const getCompletedPaymentsTotal = (payments = []) =>
       .filter((p) => (p.status || "completed") === "completed")
       .reduce((sum, p) => sum + (Number(p.amount) || 0), 0),
   );
+
+const summarizePaymentAmounts = (payments = []) => {
+  let grossAmount = 0;
+  let exchangeCreditAmount = 0;
+
+  for (const payment of Array.isArray(payments) ? payments : []) {
+    const amount = roundMoney(Number(payment?.amount) || 0);
+    if (amount <= 0) {
+      continue;
+    }
+
+    grossAmount += amount;
+
+    if (INTERNAL_CREDIT_PAYMENT_METHODS.has(payment?.method)) {
+      exchangeCreditAmount += amount;
+    }
+  }
+
+  grossAmount = roundMoney(grossAmount);
+  exchangeCreditAmount = roundMoney(exchangeCreditAmount);
+
+  return {
+    grossAmount,
+    exchangeCreditAmount,
+    netCollectedAmount: roundMoney(Math.max(0, grossAmount - exchangeCreditAmount)),
+  };
+};
 
 const getEffectivePayments = ({
   payments = [],
@@ -2210,6 +2238,8 @@ const getSalesSummary = async (req, res) => {
       .lean();
 
     let totalRevenue = 0;
+    let grossRevenue = 0;
+    let exchangeCreditApplied = 0;
     let totalTax = 0;
     let totalDiscount = 0;
     let deliveryAmountCollected = 0;
@@ -2236,18 +2266,22 @@ const getSalesSummary = async (req, res) => {
 
     const accumulateSummaryTotals = ({
       sale,
+      grossRevenueAmount,
       revenueAmount,
+      exchangeCreditAmount,
       taxAmount,
       discountAmount,
       deliveryAmount,
       transactionIncrement,
     }) => {
+      grossRevenue += grossRevenueAmount;
       totalRevenue += revenueAmount;
+      exchangeCreditApplied += exchangeCreditAmount;
       totalTax += taxAmount;
       totalDiscount += discountAmount;
       deliveryAmountCollected += deliveryAmount;
 
-      const baseSalesAmount = Math.max(0, revenueAmount - deliveryAmount);
+      const baseSalesAmount = Math.max(0, grossRevenueAmount - deliveryAmount);
       salesAmountExcludingDelivery += baseSalesAmount;
 
       const netAmount = Math.max(0, baseSalesAmount - taxAmount);
@@ -2256,7 +2290,7 @@ const getSalesSummary = async (req, res) => {
 
       const mode = sale.taxMode === "exclusive" ? "exclusive" : "inclusive";
       taxModeBreakdown[mode].transactions += transactionIncrement;
-      taxModeBreakdown[mode].totalRevenue += revenueAmount;
+      taxModeBreakdown[mode].totalRevenue += grossRevenueAmount;
       taxModeBreakdown[mode].totalTax += taxAmount;
     };
 
@@ -2280,29 +2314,33 @@ const getSalesSummary = async (req, res) => {
           });
         });
 
-        const matchedAmount = roundMoney(
-          matchedPayments.reduce((sum, payment) => sum + (Number(payment.amount) || 0), 0),
-        );
+        const {
+          grossAmount: matchedGrossAmount,
+          exchangeCreditAmount: matchedExchangeCredit,
+          netCollectedAmount: matchedNetCollected,
+        } = summarizePaymentAmounts(matchedPayments);
 
         if (matchedPayments.length === 0) {
           continue;
         }
 
-        if (matchedAmount <= 0) {
+        if (matchedGrossAmount <= 0) {
           continue;
         }
 
         const completedTotal = getCompletedPaymentsTotal(salePayments);
         const allocationRatio =
           completedTotal > 0
-            ? Math.min(1, roundMoney(matchedAmount / completedTotal))
+            ? Math.min(1, roundMoney(matchedGrossAmount / completedTotal))
             : 0;
         const saleDeliveryAmount = Number(sale.deliveryFeeAmount) || 0;
         const allocatedDeliveryAmount = saleDeliveryAmount * allocationRatio;
 
         accumulateSummaryTotals({
           sale,
-          revenueAmount: matchedAmount,
+          grossRevenueAmount: matchedGrossAmount,
+          revenueAmount: matchedNetCollected,
+          exchangeCreditAmount: matchedExchangeCredit,
           taxAmount: (Number(sale.taxAmount) || 0) * allocationRatio,
           discountAmount: (Number(sale.discountAmount) || 0) * allocationRatio,
           deliveryAmount: allocatedDeliveryAmount,
@@ -2322,8 +2360,10 @@ const getSalesSummary = async (req, res) => {
       }
     } else {
       for (const sale of sales) {
+        const salePayments = getEffectivePaymentsForSale(sale);
+
         if (paymentMethod) {
-          const hasMatchingMethod = getEffectivePaymentsForSale(sale).some(
+          const hasMatchingMethod = salePayments.some(
             (payment) =>
               (payment.status || "completed") === "completed" &&
               payment.method === paymentMethod,
@@ -2335,9 +2375,17 @@ const getSalesSummary = async (req, res) => {
         }
 
         const saleDeliveryAmount = Number(sale.deliveryFeeAmount) || 0;
+        const saleGrossAmount = roundMoney(Number(sale.totalAmount) || 0);
+        const {
+          exchangeCreditAmount: saleExchangeCredit,
+          netCollectedAmount: saleNetCollected,
+        } = summarizePaymentAmounts(salePayments);
+
         accumulateSummaryTotals({
           sale,
-          revenueAmount: Number(sale.totalAmount) || 0,
+          grossRevenueAmount: saleGrossAmount,
+          revenueAmount: saleNetCollected,
+          exchangeCreditAmount: saleExchangeCredit,
           taxAmount: Number(sale.taxAmount) || 0,
           discountAmount: Number(sale.discountAmount) || 0,
           deliveryAmount: saleDeliveryAmount,
@@ -2357,6 +2405,8 @@ const getSalesSummary = async (req, res) => {
     }
 
     totalRevenue = roundMoney(totalRevenue);
+    grossRevenue = roundMoney(grossRevenue);
+    exchangeCreditApplied = roundMoney(exchangeCreditApplied);
     totalTax = roundMoney(totalTax);
     totalDiscount = roundMoney(totalDiscount);
     deliveryAmountCollected = roundMoney(deliveryAmountCollected);
@@ -2387,6 +2437,9 @@ const getSalesSummary = async (req, res) => {
       data: {
         totalSales: transactionCount,
         totalRevenue,
+        grossRevenue,
+        netCollected: totalRevenue,
+        exchangeCreditApplied,
         salesAmountExcludingDelivery,
         netSalesExcludingTax,
         preDiscountSales,
@@ -2410,11 +2463,17 @@ const getSalesSummary = async (req, res) => {
         },
         deliverySalesCount,
         deliveryAmountShareOfRevenue:
+          grossRevenue > 0
+            ? roundMoney((deliveryAmountCollected / grossRevenue) * 100)
+            : 0,
+        deliveryAmountShareOfNetRevenue:
           totalRevenue > 0
             ? roundMoney((deliveryAmountCollected / totalRevenue) * 100)
             : 0,
         averageTransactionValue:
           transactionCount > 0 ? roundMoney(totalRevenue / transactionCount) : 0,
+        averageGrossTransactionValue:
+          transactionCount > 0 ? roundMoney(grossRevenue / transactionCount) : 0,
         itemsSold: {
           flexi: roundedFlexiCount,
           shopify: roundedShopifyCount,
@@ -2458,9 +2517,24 @@ async function getPaymentMethodBreakdown({
 
   const add = (method, amount) => {
     if (!method) return;
-    if (!map[method]) map[method] = { count: 0, total: 0 };
+    if (!map[method]) {
+      map[method] = {
+        count: 0,
+        total: 0,
+        netCollected: 0,
+        exchangeCreditApplied: 0,
+      };
+    }
+
+    const isExchangeCredit = INTERNAL_CREDIT_PAYMENT_METHODS.has(method);
+
     map[method].count += 1;
     map[method].total += amount;
+    if (isExchangeCredit) {
+      map[method].exchangeCreditApplied += amount;
+    } else {
+      map[method].netCollected += amount;
+    }
   };
 
   for (const sale of sales) {
@@ -2488,6 +2562,12 @@ async function getPaymentMethodBreakdown({
 
       add(payment.method, Number(payment.amount) || 0);
     }
+  }
+
+  for (const methodData of Object.values(map)) {
+    methodData.total = roundMoney(methodData.total);
+    methodData.netCollected = roundMoney(methodData.netCollected);
+    methodData.exchangeCreditApplied = roundMoney(methodData.exchangeCreditApplied);
   }
 
   return map;
