@@ -75,6 +75,66 @@ const receivableSchema = new mongoose.Schema(
         },
       },
     ],
+    paymentCorrections: [
+      {
+        correctionId: {
+          type: mongoose.Schema.Types.ObjectId,
+          default: () => new mongoose.Types.ObjectId(),
+        },
+        fromAllocations: [
+          {
+            paymentIndex: {
+              type: Number,
+              required: true,
+              min: 0,
+            },
+            method: {
+              type: String,
+              enum: ["cash", "card", "mobile", "check", "credit", "mpesa"],
+              required: true,
+            },
+            amount: {
+              type: Number,
+              required: true,
+              min: 0,
+            },
+          },
+        ],
+        toAllocations: [
+          {
+            method: {
+              type: String,
+              enum: ["cash", "card", "mobile", "check", "credit", "mpesa"],
+              required: true,
+            },
+            amount: {
+              type: Number,
+              required: true,
+              min: 0,
+            },
+            reference: String,
+            cardLast4: String,
+            cardBrand: String,
+          },
+        ],
+        reason: {
+          type: String,
+          trim: true,
+        },
+        notes: {
+          type: String,
+          trim: true,
+        },
+        correctedBy: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "User",
+        },
+        correctedAt: {
+          type: Date,
+          default: Date.now,
+        },
+      },
+    ],
     lastPaymentAt: Date,
     notes: String,
     createdBy: {

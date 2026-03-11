@@ -1,5 +1,6 @@
 const express = require("express");
 const router = express.Router();
+const mongoose = require("mongoose");
 const Sale = require("../models/Sale");
 const Location = require("../models/Location");
 const Product = require("../models/Product");
@@ -17,6 +18,7 @@ const { requirePermission } = require("../middleware/permissionCheck");
 const { validateLocationAccess } = require("../middleware/locationAccess");
 
 const VALID_TAX_MODES = ["inclusive", "exclusive"];
+const PAYMENT_METHODS = ["cash", "card", "mobile", "check", "credit", "mpesa"];
 
 const roundMoney = (value) => Math.round((Number(value) || 0) * 100) / 100;
 
@@ -53,6 +55,163 @@ const getCompletedPaymentsTotal = (payments = []) =>
       .filter((p) => (p.status || "completed") === "completed")
       .reduce((sum, p) => sum + (Number(p.amount) || 0), 0),
   );
+
+const getEffectivePayments = ({
+  payments = [],
+  paymentCorrections = [],
+  fallbackMethod,
+  fallbackAmount,
+  fallbackDate,
+}) => {
+  const hasSplitPayments = Array.isArray(payments) && payments.length > 0;
+
+  if (!hasSplitPayments) {
+    if (!fallbackMethod || !PAYMENT_METHODS.includes(fallbackMethod)) {
+      return [];
+    }
+
+    const amount = roundMoney(Number(fallbackAmount) || 0);
+    if (amount <= 0) {
+      return [];
+    }
+
+    return [
+      {
+        method: fallbackMethod,
+        amount,
+        status: "completed",
+        paidAt: normalizePaymentTimestamp(fallbackDate, new Date()),
+      },
+    ];
+  }
+
+  const baseEntries = payments
+    .map((payment, index) => ({
+      paymentIndex: index,
+      method: payment.method,
+      amount: roundMoney(Number(payment.amount) || 0),
+      remaining: roundMoney(Number(payment.amount) || 0),
+      status: payment.status || "completed",
+      paidAt: normalizePaymentTimestamp(payment.paidAt, fallbackDate || new Date()),
+      reference: payment.reference || undefined,
+      cardLast4: payment.cardLast4 || undefined,
+      cardBrand: payment.cardBrand || undefined,
+    }))
+    .filter(
+      (payment) =>
+        payment.status === "completed" &&
+        payment.amount > 0 &&
+        PAYMENT_METHODS.includes(payment.method),
+    );
+
+  const correctionEntries = [];
+  const sortedCorrections = (Array.isArray(paymentCorrections) ? paymentCorrections : [])
+    .slice()
+    .sort((a, b) => {
+      const aTime = normalizePaymentTimestamp(a?.correctedAt, fallbackDate || new Date());
+      const bTime = normalizePaymentTimestamp(b?.correctedAt, fallbackDate || new Date());
+      return aTime.getTime() - bTime.getTime();
+    });
+
+  for (const correction of sortedCorrections) {
+    for (const fromAllocation of correction?.fromAllocations || []) {
+      const paymentIndex = Number(fromAllocation?.paymentIndex);
+      const amount = roundMoney(Number(fromAllocation?.amount) || 0);
+      if (!Number.isInteger(paymentIndex) || paymentIndex < 0 || amount <= 0) {
+        continue;
+      }
+
+      const targetEntry = baseEntries.find((entry) => entry.paymentIndex === paymentIndex);
+      if (!targetEntry) {
+        continue;
+      }
+
+      targetEntry.remaining = Math.max(0, roundMoney(targetEntry.remaining - amount));
+    }
+
+    for (const toAllocation of correction?.toAllocations || []) {
+      const method = toAllocation?.method;
+      const amount = roundMoney(Number(toAllocation?.amount) || 0);
+      if (!PAYMENT_METHODS.includes(method) || amount <= 0) {
+        continue;
+      }
+
+      correctionEntries.push({
+        method,
+        amount,
+        status: "completed",
+        paidAt: normalizePaymentTimestamp(correction?.correctedAt, fallbackDate || new Date()),
+        reference: toAllocation?.reference || undefined,
+        cardLast4: toAllocation?.cardLast4 || undefined,
+        cardBrand: toAllocation?.cardBrand || undefined,
+      });
+    }
+  }
+
+  const remainingEntries = baseEntries
+    .filter((entry) => entry.remaining > 0)
+    .map((entry) => ({
+      method: entry.method,
+      amount: roundMoney(entry.remaining),
+      status: "completed",
+      paidAt: entry.paidAt,
+      reference: entry.reference,
+      cardLast4: entry.cardLast4,
+      cardBrand: entry.cardBrand,
+    }));
+
+  return [...remainingEntries, ...correctionEntries]
+    .filter((payment) => payment.amount > 0)
+    .map((payment) => ({
+      ...payment,
+      amount: roundMoney(payment.amount),
+    }));
+};
+
+const getEffectivePaymentsForSale = (sale = {}) =>
+  getEffectivePayments({
+    payments: sale.payments,
+    paymentCorrections: sale.paymentCorrections,
+    fallbackMethod: sale.paymentMethod,
+    fallbackAmount: sale.totalAmount,
+    fallbackDate: sale.createdAt,
+  });
+
+const getCorrectionAvailabilityByIndex = ({ payments = [], paymentCorrections = [] }) => {
+  const availability = new Map();
+
+  for (const [index, payment] of (Array.isArray(payments) ? payments : []).entries()) {
+    if ((payment?.status || "completed") !== "completed") {
+      continue;
+    }
+
+    const amount = roundMoney(Number(payment?.amount) || 0);
+    if (amount <= 0) {
+      continue;
+    }
+
+    availability.set(index, amount);
+  }
+
+  for (const correction of Array.isArray(paymentCorrections) ? paymentCorrections : []) {
+    for (const fromAllocation of correction?.fromAllocations || []) {
+      const paymentIndex = Number(fromAllocation?.paymentIndex);
+      const amount = roundMoney(Number(fromAllocation?.amount) || 0);
+      if (!Number.isInteger(paymentIndex) || paymentIndex < 0 || amount <= 0) {
+        continue;
+      }
+
+      const current = availability.get(paymentIndex);
+      if (typeof current !== "number") {
+        continue;
+      }
+
+      availability.set(paymentIndex, Math.max(0, roundMoney(current - amount)));
+    }
+  }
+
+  return availability;
+};
 
 const isDateWithinRange = ({ value, startDate, endDate }) => {
   const dateValue = normalizePaymentTimestamp(value, null);
@@ -810,7 +969,7 @@ const getSaleReceivable = async (req, res) => {
     const { id } = req.params;
 
     const sale = await Sale.findOne({ _id: id, organizationId })
-      .select("_id locationId totalAmount paymentStatus payments")
+      .select("_id locationId totalAmount paymentStatus paymentMethod payments paymentCorrections createdAt")
       .lean();
 
     if (!sale) {
@@ -837,7 +996,8 @@ const getSaleReceivable = async (req, res) => {
 
     const receivable = await Receivable.findOne({ organizationId, saleId: id }).lean();
     if (!receivable) {
-      const amountPaid = getCompletedPaymentsTotal(sale.payments || []);
+      const effectivePayments = getEffectivePaymentsForSale(sale);
+      const amountPaid = getCompletedPaymentsTotal(effectivePayments);
       const balanceDue = Math.max(0, roundMoney((sale.totalAmount || 0) - amountPaid));
       return res.json({
         success: true,
@@ -848,13 +1008,24 @@ const getSaleReceivable = async (req, res) => {
           balanceDue,
           status: balanceDue > 0.01 ? "open" : "paid",
           payments: sale.payments || [],
+          effectivePayments,
+          paymentCorrections: sale.paymentCorrections || [],
         },
       });
     }
 
+    const effectivePayments = getEffectivePayments({
+      payments: receivable.payments,
+      paymentCorrections: receivable.paymentCorrections,
+      fallbackDate: sale.createdAt,
+    });
+
     res.json({
       success: true,
-      data: receivable,
+      data: {
+        ...receivable,
+        effectivePayments,
+      },
     });
   } catch (error) {
     console.error("Get sale receivable error:", error);
@@ -1065,6 +1236,298 @@ const recordSalePayment = async (req, res) => {
 };
 
 /**
+ * PATCH /sales/:id/payments/reallocate
+ * Reallocate completed payment allocations with immutable correction trail
+ */
+const reallocateSalePayment = async (req, res) => {
+  const session = await Sale.startSession();
+
+  try {
+    const { organizationId, userId, role } = req.user;
+    const { id } = req.params;
+    const {
+      fromAllocations,
+      toAllocations,
+      reason,
+      notes,
+    } = req.body || {};
+
+    if (!Array.isArray(fromAllocations) || fromAllocations.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "fromAllocations is required",
+      });
+    }
+
+    if (!Array.isArray(toAllocations) || toAllocations.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "toAllocations is required",
+      });
+    }
+
+    if (!reason || !String(reason).trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "reason is required",
+      });
+    }
+
+    const sale = await Sale.findOne({ _id: id, organizationId }).session(session);
+    if (!sale) {
+      return res.status(404).json({
+        success: false,
+        message: "Sale not found",
+      });
+    }
+
+    const hasAccess = await userHasLocationAccess({
+      organizationId,
+      userId,
+      role,
+      locationId: sale.locationId,
+    });
+
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied. You do not have access to this location.",
+        code: "LOCATION_ACCESS_DENIED",
+      });
+    }
+
+    if (sale.status === "voided") {
+      return res.status(400).json({
+        success: false,
+        message: "Cannot reallocate payments for a voided sale",
+      });
+    }
+
+    if (!Array.isArray(sale.payments) || sale.payments.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Sale has no split payments to reallocate",
+      });
+    }
+
+    const normalizedFrom = fromAllocations.map((allocation) => ({
+      paymentIndex: Number(allocation?.paymentIndex),
+      amount: roundMoney(Number(allocation?.amount) || 0),
+    }));
+
+    if (
+      normalizedFrom.some(
+        (allocation) =>
+          !Number.isInteger(allocation.paymentIndex) ||
+          allocation.paymentIndex < 0 ||
+          allocation.amount <= 0,
+      )
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Each from allocation must include valid paymentIndex and amount > 0",
+      });
+    }
+
+    const normalizedTo = toAllocations.map((allocation) => ({
+      method: String(allocation?.method || "").trim().toLowerCase(),
+      amount: roundMoney(Number(allocation?.amount) || 0),
+      reference: allocation?.reference || undefined,
+      cardLast4: allocation?.cardLast4 || undefined,
+      cardBrand: allocation?.cardBrand || undefined,
+    }));
+
+    if (
+      normalizedTo.some(
+        (allocation) =>
+          !PAYMENT_METHODS.includes(allocation.method) ||
+          allocation.amount <= 0,
+      )
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Each to allocation must include valid payment method and amount > 0",
+      });
+    }
+
+    const groupedFromByIndex = normalizedFrom.reduce((acc, allocation) => {
+      acc.set(
+        allocation.paymentIndex,
+        roundMoney((acc.get(allocation.paymentIndex) || 0) + allocation.amount),
+      );
+      return acc;
+    }, new Map());
+
+    const availableSaleByIndex = getCorrectionAvailabilityByIndex({
+      payments: sale.payments,
+      paymentCorrections: sale.paymentCorrections,
+    });
+
+    const resolvedFromAllocations = [];
+    for (const [paymentIndex, amount] of groupedFromByIndex.entries()) {
+      const payment = sale.payments[paymentIndex];
+      if (!payment) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid paymentIndex ${paymentIndex}`,
+        });
+      }
+
+      if ((payment.status || "completed") !== "completed") {
+        return res.status(400).json({
+          success: false,
+          message: `Payment at index ${paymentIndex} is not completed`,
+        });
+      }
+
+      const available = roundMoney(availableSaleByIndex.get(paymentIndex) || 0);
+      if (amount - available > 0.01) {
+        return res.status(400).json({
+          success: false,
+          message: `Allocation amount exceeds remaining correctable amount for payment index ${paymentIndex}`,
+        });
+      }
+
+      resolvedFromAllocations.push({
+        paymentIndex,
+        method: payment.method,
+        amount,
+      });
+    }
+
+    const fromTotal = roundMoney(
+      resolvedFromAllocations.reduce((sum, allocation) => sum + allocation.amount, 0),
+    );
+    const toTotal = roundMoney(
+      normalizedTo.reduce((sum, allocation) => sum + allocation.amount, 0),
+    );
+
+    if (Math.abs(fromTotal - toTotal) > 0.01) {
+      return res.status(400).json({
+        success: false,
+        message: "Total amount in fromAllocations must match total amount in toAllocations",
+      });
+    }
+
+    session.startTransaction();
+
+    let receivable = await Receivable.findOne({ organizationId, saleId: sale._id }).session(
+      session,
+    );
+
+    if (!receivable) {
+      const paid = getCompletedPaymentsTotal(sale.payments || []);
+      const outstanding = Math.max(0, roundMoney((sale.totalAmount || 0) - paid));
+
+      receivable = new Receivable({
+        organizationId,
+        locationId: sale.locationId,
+        saleId: sale._id,
+        customerId: sale.customerId || undefined,
+        customerName: sale.customerName || undefined,
+        totalDue: roundMoney(sale.totalAmount),
+        totalPaid: paid,
+        balanceDue: outstanding,
+        status: paid > 0 ? "partial" : "open",
+        payments: (sale.payments || []).map((p) => ({
+          method: p.method,
+          amount: Number(p.amount) || 0,
+          reference: p.reference || undefined,
+          status: p.status || "completed",
+          cardLast4: p.cardLast4 || undefined,
+          cardBrand: p.cardBrand || undefined,
+          collectedBy: sale.cashierId,
+          collectedAt: normalizePaymentTimestamp(p.paidAt, sale.createdAt || new Date()),
+        })),
+        createdBy: sale.cashierId,
+        updatedBy: userId,
+      });
+    }
+
+    const availableReceivableByIndex = getCorrectionAvailabilityByIndex({
+      payments: receivable.payments,
+      paymentCorrections: receivable.paymentCorrections,
+    });
+
+    for (const fromAllocation of resolvedFromAllocations) {
+      const receivablePayment = receivable.payments[fromAllocation.paymentIndex];
+      if (!receivablePayment) {
+        await session.abortTransaction();
+        return res.status(400).json({
+          success: false,
+          message: `Receivable payment index ${fromAllocation.paymentIndex} is invalid`,
+        });
+      }
+
+      const available = roundMoney(
+        availableReceivableByIndex.get(fromAllocation.paymentIndex) || 0,
+      );
+      if (fromAllocation.amount - available > 0.01) {
+        await session.abortTransaction();
+        return res.status(400).json({
+          success: false,
+          message: `Receivable correction amount exceeds available amount for payment index ${fromAllocation.paymentIndex}`,
+        });
+      }
+    }
+
+    const correctionId = new mongoose.Types.ObjectId();
+    const correctedAt = new Date();
+    const correctionPayload = {
+      correctionId,
+      fromAllocations: resolvedFromAllocations,
+      toAllocations: normalizedTo,
+      reason: String(reason).trim(),
+      notes: notes ? String(notes).trim() : undefined,
+      correctedBy: userId,
+      correctedAt,
+    };
+
+    sale.paymentCorrections = [...(sale.paymentCorrections || []), correctionPayload];
+    sale.paymentStatus = deriveSalePaymentStatus(
+      getEffectivePaymentsForSale(sale),
+      sale.totalAmount,
+    );
+    sale.lastModified = correctedAt;
+    sale.modifiedBy = userId;
+    sale.supervisorId = userId;
+    await sale.save({ session });
+
+    receivable.paymentCorrections = [
+      ...(receivable.paymentCorrections || []),
+      correctionPayload,
+    ];
+    receivable.updatedBy = userId;
+    await receivable.save({ session });
+
+    await session.commitTransaction();
+
+    const effectivePayments = getEffectivePaymentsForSale(sale);
+
+    res.json({
+      success: true,
+      message: "Payment allocation corrected successfully",
+      data: {
+        saleId: sale._id,
+        correctionId,
+        effectivePayments,
+        paymentStatus: sale.paymentStatus,
+      },
+    });
+  } catch (error) {
+    await session.abortTransaction();
+    console.error("Reallocate sale payment error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to reallocate payment",
+      error: error.message,
+    });
+  } finally {
+    await session.endSession();
+  }
+};
+
+/**
  * Helper: Process inventory updates for FLEXI and Shopify items
  * Executes within a MongoDB transaction session
  */
@@ -1249,9 +1712,12 @@ const getSale = async (req, res) => {
       });
     }
 
+    const saleData = sale.toObject();
+    saleData.effectivePayments = getEffectivePaymentsForSale(saleData);
+
     res.json({
       success: true,
-      data: sale,
+      data: saleData,
     });
   } catch (error) {
     console.error("Get sale error:", error);
@@ -1337,22 +1803,6 @@ const listSales = async (req, res) => {
     }
     if (locationId) filter.locationId = locationId;
     if (status) filter.status = status;
-    if (paymentMethod) {
-      const paymentFilters = [
-        { paymentMethod },
-        { "payments.method": paymentMethod },
-      ];
-
-      if (filter.$or) {
-        filter.$and = [{ $or: filter.$or }, { $or: paymentFilters }];
-        delete filter.$or;
-      } else if (filter.$and) {
-        filter.$and.push({ $or: paymentFilters });
-      } else {
-        filter.$or = paymentFilters;
-      }
-    }
-
     if (req.query.paymentStatus) {
       filter.paymentStatus = req.query.paymentStatus;
     }
@@ -1391,7 +1841,7 @@ const listSales = async (req, res) => {
 
       const paymentTimeRows = allSales
         .map((sale) => {
-          const salePayments = Array.isArray(sale.payments) ? sale.payments : [];
+          const salePayments = getEffectivePaymentsForSale(sale);
 
           const matchedPayments = salePayments.filter((payment) => {
             if ((payment.status || "completed") !== "completed") {
@@ -1409,16 +1859,7 @@ const listSales = async (req, res) => {
             });
           });
 
-          const hasLegacySinglePayment = salePayments.length === 0;
-          const legacyInRange = hasLegacySinglePayment
-            ? isDateWithinRange({
-                value: sale.createdAt,
-                startDate: startDateObj,
-                endDate: endDateObj,
-              })
-            : false;
-
-          if (matchedPayments.length === 0 && !legacyInRange) {
+          if (matchedPayments.length === 0) {
             return null;
           }
 
@@ -1426,32 +1867,26 @@ const listSales = async (req, res) => {
           let lastPaymentAtInRange = null;
           let paymentMethodsInRange = [];
 
-          if (matchedPayments.length > 0) {
-            amountPaidInRange = roundMoney(
-              matchedPayments.reduce(
-                (sum, payment) => sum + (Number(payment.amount) || 0),
-                0,
-              ),
-            );
+          amountPaidInRange = roundMoney(
+            matchedPayments.reduce(
+              (sum, payment) => sum + (Number(payment.amount) || 0),
+              0,
+            ),
+          );
 
-            const paymentDates = matchedPayments
-              .map((payment) => normalizePaymentTimestamp(payment.paidAt, sale.createdAt))
-              .filter(Boolean);
+          const paymentDates = matchedPayments
+            .map((payment) => normalizePaymentTimestamp(payment.paidAt, sale.createdAt))
+            .filter(Boolean);
 
-            if (paymentDates.length > 0) {
-              lastPaymentAtInRange = paymentDates
-                .sort((a, b) => b.getTime() - a.getTime())[0]
-                .toISOString();
-            }
-
-            paymentMethodsInRange = [
-              ...new Set(matchedPayments.map((payment) => payment.method).filter(Boolean)),
-            ];
-          } else {
-            amountPaidInRange = Number(sale.totalAmount) || 0;
-            lastPaymentAtInRange = normalizePaymentTimestamp(sale.createdAt).toISOString();
-            paymentMethodsInRange = sale.paymentMethod ? [sale.paymentMethod] : [];
+          if (paymentDates.length > 0) {
+            lastPaymentAtInRange = paymentDates
+              .sort((a, b) => b.getTime() - a.getTime())[0]
+              .toISOString();
           }
+
+          paymentMethodsInRange = [
+            ...new Set(matchedPayments.map((payment) => payment.method).filter(Boolean)),
+          ];
 
           return {
             ...sale,
@@ -1477,14 +1912,32 @@ const listSales = async (req, res) => {
       total = paymentTimeRows.length;
       sales = paymentTimeRows.slice(skip, skip + parseInt(limit));
     } else {
-      sales = await Sale.find(filter)
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(parseInt(limit))
-        .select("-inventoryUpdates -shopifySyncLog")
-        .lean();
+      if (paymentMethod) {
+        const allSales = await Sale.find(filter)
+          .sort({ createdAt: -1 })
+          .select("-inventoryUpdates -shopifySyncLog")
+          .lean();
 
-      total = await Sale.countDocuments(filter);
+        const filteredSales = allSales.filter((sale) =>
+          getEffectivePaymentsForSale(sale).some(
+            (payment) =>
+              (payment.status || "completed") === "completed" &&
+              payment.method === paymentMethod,
+          ),
+        );
+
+        total = filteredSales.length;
+        sales = filteredSales.slice(skip, skip + parseInt(limit));
+      } else {
+        sales = await Sale.find(filter)
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(parseInt(limit))
+          .select("-inventoryUpdates -shopifySyncLog")
+          .lean();
+
+        total = await Sale.countDocuments(filter);
+      }
     }
 
     res.json({
@@ -1744,10 +2197,6 @@ const getSalesSummary = async (req, res) => {
     if (paymentStatus) filter.paymentStatus = paymentStatus;
     if (shopifySyncStatus) filter.shopifySyncStatus = shopifySyncStatus;
 
-    if (paymentMethod) {
-      filter.$or = [{ paymentMethod }, { "payments.method": paymentMethod }];
-    }
-
     if (requestedTimeBasis === "sale" && (startDateObj || endDateObj)) {
       filter.createdAt = {};
       if (startDateObj) filter.createdAt.$gte = startDateObj;
@@ -1756,7 +2205,7 @@ const getSalesSummary = async (req, res) => {
 
     const sales = await Sale.find(filter)
       .select(
-        "totalAmount deliveryFeeAmount taxAmount discountAmount taxMode items payments paymentMethod createdAt",
+        "totalAmount deliveryFeeAmount taxAmount discountAmount taxMode items payments paymentCorrections paymentMethod createdAt",
       )
       .lean();
 
@@ -1813,7 +2262,7 @@ const getSalesSummary = async (req, res) => {
 
     if (requestedTimeBasis === "payment") {
       for (const sale of sales) {
-        const salePayments = Array.isArray(sale.payments) ? sale.payments : [];
+        const salePayments = getEffectivePaymentsForSale(sale);
 
         const matchedPayments = salePayments.filter((payment) => {
           if ((payment.status || "completed") !== "completed") {
@@ -1835,42 +2284,7 @@ const getSalesSummary = async (req, res) => {
           matchedPayments.reduce((sum, payment) => sum + (Number(payment.amount) || 0), 0),
         );
 
-        if (matchedPayments.length === 0 && salePayments.length === 0) {
-          const legacyMethod = sale.paymentMethod;
-          const methodMatches = !paymentMethod || legacyMethod === paymentMethod;
-          const legacyInRange = isDateWithinRange({
-            value: sale.createdAt,
-            startDate: startDateObj,
-            endDate: endDateObj,
-          });
-
-          if (methodMatches && legacyInRange) {
-            const legacyAmount = Number(sale.totalAmount) || 0;
-            const legacyDeliveryAmount = Number(sale.deliveryFeeAmount) || 0;
-            const legacyTax = Number(sale.taxAmount) || 0;
-            const legacyDiscount = Number(sale.discountAmount) || 0;
-
-            accumulateSummaryTotals({
-              sale,
-              revenueAmount: legacyAmount,
-              taxAmount: legacyTax,
-              discountAmount: legacyDiscount,
-              deliveryAmount: legacyDeliveryAmount,
-              transactionIncrement: 1,
-            });
-
-            if (legacyDeliveryAmount > 0) {
-              deliverySalesCount += 1;
-            }
-            transactionCount += 1;
-
-            for (const item of sale.items || []) {
-              if (item.type === "flexi") fleximCount += Number(item.quantity) || 0;
-              else if (item.type === "shopify")
-                shopifyCount += Number(item.quantity) || 0;
-            }
-          }
-
+        if (matchedPayments.length === 0) {
           continue;
         }
 
@@ -1908,6 +2322,18 @@ const getSalesSummary = async (req, res) => {
       }
     } else {
       for (const sale of sales) {
+        if (paymentMethod) {
+          const hasMatchingMethod = getEffectivePaymentsForSale(sale).some(
+            (payment) =>
+              (payment.status || "completed") === "completed" &&
+              payment.method === paymentMethod,
+          );
+
+          if (!hasMatchingMethod) {
+            continue;
+          }
+        }
+
         const saleDeliveryAmount = Number(sale.deliveryFeeAmount) || 0;
         accumulateSummaryTotals({
           sale,
@@ -2025,7 +2451,7 @@ async function getPaymentMethodBreakdown({
   paymentMethod,
 }) {
   const sales = await Sale.find(filter)
-    .select("paymentMethod payments totalAmount")
+    .select("paymentMethod payments paymentCorrections totalAmount createdAt")
     .lean();
 
   const map = {};
@@ -2038,34 +2464,21 @@ async function getPaymentMethodBreakdown({
   };
 
   for (const sale of sales) {
-    if (sale.payments && Array.isArray(sale.payments) && sale.payments.length > 0) {
-      for (const payment of sale.payments) {
-        if ((payment.status || "completed") !== "completed") {
-          continue;
-        }
+    const salePayments = getEffectivePaymentsForSale(sale);
 
-        if (paymentMethod && payment.method !== paymentMethod) {
-          continue;
-        }
-
-        if (
-          timeBasis === "payment" &&
-          !isDateWithinRange({
-            value: payment.paidAt || sale.createdAt,
-            startDate,
-            endDate,
-          })
-        ) {
-          continue;
-        }
-
-        add(payment.method, Number(payment.amount) || 0);
+    for (const payment of salePayments) {
+      if ((payment.status || "completed") !== "completed") {
+        continue;
       }
-    } else {
+
+      if (paymentMethod && payment.method !== paymentMethod) {
+        continue;
+      }
+
       if (
         timeBasis === "payment" &&
         !isDateWithinRange({
-          value: sale.createdAt,
+          value: payment.paidAt || sale.createdAt,
           startDate,
           endDate,
         })
@@ -2073,11 +2486,7 @@ async function getPaymentMethodBreakdown({
         continue;
       }
 
-      if (paymentMethod && sale.paymentMethod !== paymentMethod) {
-        continue;
-      }
-
-      add(sale.paymentMethod, Number(sale.totalAmount) || 0);
+      add(payment.method, Number(payment.amount) || 0);
     }
   }
 
@@ -2705,6 +3114,11 @@ router.post(
   "/:id/payments",
   requirePermission("create_sale"),
   recordSalePayment,
+);
+router.patch(
+  "/:id/payments/reallocate",
+  requirePermission("edit_sale"),
+  reallocateSalePayment,
 );
 router.get("/:id", requirePermission("view_sale_history"), getSale);
 router.get("/", requirePermission("view_sale_history"), listSales);
