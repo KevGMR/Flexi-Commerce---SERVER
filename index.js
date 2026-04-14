@@ -30,6 +30,9 @@ const shopifyRouter = require("./controllers/ShopifyController");
 const salesRouter = require("./controllers/Sales");
 const deliveryFeeRouter = require("./controllers/DeliveryFee");
 const driverRouter = require("./controllers/Driver");
+const expenseRouter = require("./controllers/Expense");
+const shiftSessionRouter = require("./controllers/ShiftSession");
+const reconciliationRouter = require("./controllers/Reconciliation");
 
 const { verifyToken } = require("./middleware/auth");
 const { checkUserStatus } = require("./middleware/userStatusCheck");
@@ -139,6 +142,11 @@ app.use("/delivery-fees", verifyToken, checkUserStatus, deliveryFeeRouter);
 
 // Driver Routes (Protected)
 app.use("/drivers", verifyToken, checkUserStatus, driverRouter);
+
+// Finance Routes (Protected)
+app.use("/expenses", verifyToken, checkUserStatus, expenseRouter);
+app.use("/shift-sessions", verifyToken, checkUserStatus, shiftSessionRouter);
+app.use("/reconciliation", verifyToken, checkUserStatus, reconciliationRouter);
 
 // 404 Handler
 app.use((req, res) => {

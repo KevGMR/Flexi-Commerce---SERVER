@@ -7,6 +7,7 @@ const { processQueueItem } = require('../services/shopifySync');
 const retryWorker = require('../workers/shopifyRetryWorker');
 const crypto = require('crypto');
 const axios = require('axios');
+const mongoose = require('mongoose');
 const express = require('express');
 const router = express.Router();
 
@@ -740,6 +741,335 @@ const getProducts = async (req, res) => {
   }
 };
 
+function normalizeMatchKey(value) {
+  if (!value) return '';
+  return String(value).trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function parseEstimatedDays(rateName = '') {
+  const text = String(rateName).toLowerCase();
+
+  const rangeMatch = text.match(/(\d+)\s*[-–]\s*(\d+)\s*(business\s*)?days?/);
+  if (rangeMatch) {
+    const min = parseInt(rangeMatch[1], 10);
+    const max = parseInt(rangeMatch[2], 10);
+    if (Number.isFinite(min) && Number.isFinite(max)) {
+      return Math.max(1, Math.round((min + max) / 2));
+    }
+  }
+
+  const singleMatch = text.match(/(\d+)\s*(business\s*)?days?/);
+  if (singleMatch) {
+    const days = parseInt(singleMatch[1], 10);
+    if (Number.isFinite(days)) {
+      return Math.max(1, days);
+    }
+  }
+
+  return 1;
+}
+
+function toPriceNumber(value) {
+  const price = Number(value);
+  if (!Number.isFinite(price) || price < 0) return 0;
+  return price;
+}
+
+function buildCategoryDescription(zone) {
+  const countries = Array.isArray(zone?.countries) ? zone.countries : [];
+  if (countries.length === 0) return 'Imported from Shopify shipping zone';
+
+  const countryNames = countries
+    .map((country) => country?.name)
+    .filter(Boolean);
+
+  if (countryNames.length === 0) {
+    return 'Imported from Shopify shipping zone';
+  }
+
+  const preview = countryNames.slice(0, 3).join(', ');
+  if (countryNames.length <= 3) {
+    return `Imported from Shopify shipping zone (${preview})`;
+  }
+
+  return `Imported from Shopify shipping zone (${preview} +${countryNames.length - 3} more)`;
+}
+
+function normalizeShippingZones(shippingZones = []) {
+  const result = [];
+
+  for (const zone of shippingZones) {
+    const zoneName = (zone?.name || '').trim();
+    if (!zoneName) continue;
+
+    const priceRates = Array.isArray(zone?.price_based_shipping_rates)
+      ? zone.price_based_shipping_rates
+      : [];
+    const weightRates = Array.isArray(zone?.weight_based_shipping_rates)
+      ? zone.weight_based_shipping_rates
+      : [];
+
+    const rawRates = [...priceRates, ...weightRates];
+    const dedupe = new Map();
+
+    for (const rate of rawRates) {
+      const optionName = (rate?.name || '').trim();
+      if (!optionName) continue;
+
+      const optionKey = normalizeMatchKey(optionName);
+      if (!optionKey) continue;
+
+      if (!dedupe.has(optionKey)) {
+        dedupe.set(optionKey, {
+          optionName,
+          price: toPriceNumber(rate?.price),
+          estimatedDays: parseEstimatedDays(optionName),
+          isActive: true,
+          description: 'Imported from Shopify shipping rate',
+        });
+      }
+    }
+
+    if (dedupe.size === 0) continue;
+
+    result.push({
+      categoryName: zoneName,
+      description: buildCategoryDescription(zone),
+      isActive: true,
+      childOptions: Array.from(dedupe.values()),
+    });
+  }
+
+  return result;
+}
+
+function buildDefaultStatusWorkflow() {
+  return [
+    { status: 'pending', displayName: 'Pending', order: 0 },
+    { status: 'in_progress', displayName: 'In Progress', order: 1 },
+    { status: 'delivered', displayName: 'Delivered', order: 2 },
+  ];
+}
+
+function mergeShippingCategories(existingCategories = [], importedCategories = []) {
+  const now = new Date();
+  const categories = Array.isArray(existingCategories) ? existingCategories : [];
+  let createdCategories = 0;
+  let updatedCategories = 0;
+  let createdOptions = 0;
+  let updatedOptions = 0;
+
+  for (const importedCategory of importedCategories) {
+    const categoryKey = normalizeMatchKey(importedCategory.categoryName);
+    if (!categoryKey) continue;
+
+    let category = categories.find(
+      (cat) => normalizeMatchKey(cat?.categoryName) === categoryKey
+    );
+
+    if (!category) {
+      category = {
+        _id: new mongoose.Types.ObjectId(),
+        categoryName: importedCategory.categoryName,
+        description: importedCategory.description || '',
+        isActive: true,
+        statusWorkflow: buildDefaultStatusWorkflow(),
+        childOptions: [],
+        createdAt: now,
+        updatedAt: now,
+      };
+      categories.push(category);
+      createdCategories += 1;
+    } else {
+      let categoryChanged = false;
+      if ((category.description || '') !== (importedCategory.description || '')) {
+        category.description = importedCategory.description || '';
+        categoryChanged = true;
+      }
+      if (category.isActive !== true) {
+        category.isActive = true;
+        categoryChanged = true;
+      }
+      if (!Array.isArray(category.statusWorkflow) || category.statusWorkflow.length === 0) {
+        category.statusWorkflow = buildDefaultStatusWorkflow();
+        categoryChanged = true;
+      }
+      if (categoryChanged) {
+        category.updatedAt = now;
+        updatedCategories += 1;
+      }
+    }
+
+    if (!Array.isArray(category.childOptions)) {
+      category.childOptions = [];
+    }
+
+    for (const importedOption of importedCategory.childOptions || []) {
+      const optionKey = normalizeMatchKey(importedOption.optionName);
+      if (!optionKey) continue;
+
+      const option = category.childOptions.find(
+        (opt) => normalizeMatchKey(opt?.optionName) === optionKey
+      );
+
+      if (!option) {
+        category.childOptions.push({
+          _id: new mongoose.Types.ObjectId(),
+          optionName: importedOption.optionName,
+          price: importedOption.price,
+          estimatedDays: importedOption.estimatedDays,
+          description: importedOption.description || '',
+          isActive: true,
+        });
+        category.updatedAt = now;
+        createdOptions += 1;
+        continue;
+      }
+
+      let optionChanged = false;
+      if (option.price !== importedOption.price) {
+        option.price = importedOption.price;
+        optionChanged = true;
+      }
+      if (option.estimatedDays !== importedOption.estimatedDays) {
+        option.estimatedDays = importedOption.estimatedDays;
+        optionChanged = true;
+      }
+      if ((option.description || '') !== (importedOption.description || '')) {
+        option.description = importedOption.description || '';
+        optionChanged = true;
+      }
+      if (option.isActive !== true) {
+        option.isActive = true;
+        optionChanged = true;
+      }
+
+      if (optionChanged) {
+        category.updatedAt = now;
+        updatedOptions += 1;
+      }
+    }
+  }
+
+  return {
+    categories,
+    summary: {
+      createdCategories,
+      updatedCategories,
+      createdOptions,
+      updatedOptions,
+      totalImportedCategories: importedCategories.length,
+    },
+  };
+}
+
+/**
+ * POST /shopify/import-shipping
+ * Import Shopify shipping zones/rates into Flexi location delivery categories
+ */
+const importShipping = async (req, res) => {
+  try {
+    const { organizationId } = req.user;
+    const { locationId } = req.body;
+
+    if (!locationId) {
+      return res.status(400).json({
+        success: false,
+        message: 'locationId is required',
+      });
+    }
+
+    const [connection, location] = await Promise.all([
+      ShopifyConnection.findOne({ organizationId })
+        .select('+clientId +clientSecret +accessToken +tokenExpiresAt'),
+      Location.findOne({ _id: locationId, organizationId }),
+    ]);
+
+    if (!connection) {
+      return res.status(404).json({
+        success: false,
+        message: 'No Shopify connection found. Connect Shopify first.',
+      });
+    }
+
+    if (!location) {
+      return res.status(404).json({
+        success: false,
+        message: 'Location not found for this organization',
+      });
+    }
+
+    if (!location.shopifyLocationId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Location is not mapped to Shopify. Map a Shopify location first.',
+      });
+    }
+
+    const { accessToken } = await getAccessToken(
+      connection.storeUrl,
+      connection.clientId,
+      connection.clientSecret,
+      organizationId
+    );
+
+    const shippingZonesUrl = `https://${connection.storeUrl}/admin/api/${connection.apiVersion}/shipping_zones.json`;
+    const { data } = await axios.get(shippingZonesUrl, {
+      headers: {
+        'X-Shopify-Access-Token': accessToken,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    const shippingZones = Array.isArray(data?.shipping_zones) ? data.shipping_zones : [];
+    const importedCategories = normalizeShippingZones(shippingZones);
+
+    if (importedCategories.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: 'No importable Shopify shipping rates found.',
+        data: {
+          locationId: location._id,
+          locationName: location.name,
+          summary: {
+            createdCategories: 0,
+            updatedCategories: 0,
+            createdOptions: 0,
+            updatedOptions: 0,
+            totalImportedCategories: 0,
+          },
+        },
+      });
+    }
+
+    const mergeResult = mergeShippingCategories(
+      location.deliveryCategories || [],
+      importedCategories
+    );
+
+    location.deliveryCategories = mergeResult.categories;
+    await location.save();
+
+    res.json({
+      success: true,
+      message: 'Shopify shipping data imported successfully',
+      data: {
+        locationId: location._id,
+        locationName: location.name,
+        shopifyLocationId: location.shopifyLocationId,
+        summary: mergeResult.summary,
+      },
+    });
+  } catch (error) {
+    console.error('Import shipping error:', error?.response?.data || error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to import Shopify shipping data',
+      error: error.message,
+    });
+  }
+};
+
 /**
  * POST /shopify/webhooks/:topic
  * Receive Shopify webhooks
@@ -997,6 +1327,7 @@ router.post('/connect', connect);
 router.delete('/disconnect', disconnect);
 router.get('/connection', getConnection);
 router.get('/products', getProducts);
+router.post('/import-shipping', importShipping);
 router.get('/sync-queue', getSyncQueue);
 router.post('/sync-queue/process', processSyncQueue);         // manual trigger
 router.post('/sync-queue/:queueId/retry', retrySyncQueueItem); // single-item retry
