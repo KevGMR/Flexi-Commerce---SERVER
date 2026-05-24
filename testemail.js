@@ -35,4 +35,4 @@ const testEmailViaBrevo = async () => {
   }
 };
 
-testEmailViaBrevo();
+testEmailViaBrevo()
