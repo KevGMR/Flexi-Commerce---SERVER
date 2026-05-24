@@ -1,36 +1,25 @@
 const express = require("express");
 const router = express.Router();
 const ShiftSession = require("../models/ShiftSession");
+const Expense = require("../models/Expense");
 const Sale = require("../models/Sale");
 const Location = require("../models/Location");
-const ReconciliationSession = require("../models/ReconciliationSession");
 const { generateZReportForShiftSession } = require("../services/zReportService");
 const { requirePermission } = require("../middleware/permissionCheck");
 const { PERMISSIONS } = require("../config/permissions");
-
-const roundMoney = (value) => Math.round((Number(value) || 0) * 100) / 100;
+const {
+  roundMoney,
+  getSaleCashPaymentsTotal,
+  buildShiftExpenseMatch,
+  calculateExpectedClosingCash,
+} = require("../utils/shiftSessionCalculations");
+const { attachShiftToEligibleReconciliationSession } = require("./Reconciliation");
 
 const normalizePagination = (req) => {
   const page = Math.max(1, Number(req.query.page) || 1);
   const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
   const skip = (page - 1) * limit;
   return { page, limit, skip };
-};
-
-const getSaleCashPaymentsTotal = (sale) => {
-  if (Array.isArray(sale?.payments) && sale.payments.length > 0) {
-    return roundMoney(
-      sale.payments
-        .filter((payment) => payment?.method === "cash" && (payment?.status || "completed") === "completed")
-        .reduce((sum, payment) => sum + (Number(payment?.amount) || 0), 0)
-    );
-  }
-
-  if (sale?.paymentMethod === "cash" && Number(sale?.totalAmount) > 0) {
-    return roundMoney(Number(sale.totalAmount));
-  }
-
-  return 0;
 };
 
 const computeExpectedCashSales = async ({ organizationId, locationId, cashierId, openedAt, closedAt }) => {
@@ -53,6 +42,22 @@ const computeExpectedCashSales = async ({ organizationId, locationId, cashierId,
     .lean();
 
   return roundMoney(sales.reduce((sum, sale) => sum + getSaleCashPaymentsTotal(sale), 0));
+};
+
+const computeCashExpenseTotal = async ({ organizationId, locationId, shiftSessionId, cashierId, openedAt, closedAt }) => {
+  const aggregateResult = await Expense.aggregate([
+    {
+      $match: buildShiftExpenseMatch({ organizationId, locationId, shiftSessionId, cashierId, openedAt, closedAt }),
+    },
+    {
+      $group: {
+        _id: null,
+        total: { $sum: "$amount" },
+      },
+    },
+  ]);
+
+  return roundMoney(aggregateResult[0]?.total || 0);
 };
 
 router.get(
@@ -173,6 +178,18 @@ router.post(
         updatedBy: userId,
       });
 
+      try {
+        await attachShiftToEligibleReconciliationSession({
+          organizationId,
+          locationId: session.locationId,
+          openedAt: session.openedAt,
+          shiftSession: session,
+          userId,
+        });
+      } catch (attachError) {
+        console.error("Auto-attach shift to reconciliation session error:", attachError);
+      }
+
       res.status(201).json({
         success: true,
         message: "Shift opened successfully",
@@ -209,36 +226,6 @@ router.post(
 
       const closeTime = new Date();
 
-      const reconciliationSessions = await ReconciliationSession.find({
-        organizationId,
-        locationId: session.locationId,
-        windowStart: { $gte: session.openedAt },
-        windowEnd: { $lte: closeTime },
-        $or: [{ cashierId: session.cashierId }, { cashierId: { $exists: false } }, { cashierId: null }],
-      })
-        .select("_id sessionCode status totalVariance")
-        .lean();
-
-      if (reconciliationSessions.length === 0) {
-        return res.status(400).json({
-          success: false,
-          code: "RECONCILIATION_REQUIRED",
-          message: "At least one reconciliation session is required before closing shift",
-        });
-      }
-
-      const unresolved = reconciliationSessions.filter((entry) => entry.status !== "reconciled");
-      if (unresolved.length > 0) {
-        return res.status(400).json({
-          success: false,
-          code: "RECONCILIATION_UNRESOLVED",
-          message: "Resolve all reconciliation sessions before closing shift",
-          data: {
-            unresolved,
-          },
-        });
-      }
-
       const expectedCashSales = await computeExpectedCashSales({
         organizationId,
         locationId: session.locationId,
@@ -246,20 +233,27 @@ router.post(
         openedAt: session.openedAt,
         closedAt: closeTime,
       });
+      const cashExpenseTotal = await computeCashExpenseTotal({
+        organizationId,
+        locationId: session.locationId,
+        shiftSessionId: session._id,
+        cashierId: session.cashierId,
+        openedAt: session.openedAt,
+        closedAt: closeTime,
+      });
 
       const openingCash = roundMoney(session.openingCash || 0);
-      const expectedClosingCash = roundMoney(openingCash + expectedCashSales);
+      const expectedClosingCash = calculateExpectedClosingCash({ openingCash, expectedCashSales, cashExpenseTotal });
       const closing = roundMoney(closingCash);
       const cashVariance = roundMoney(closing - expectedClosingCash);
 
       session.status = "closed";
       session.closedAt = closeTime;
       session.expectedCashSales = expectedCashSales;
+      session.cashExpenseTotal = cashExpenseTotal;
       session.expectedClosingCash = expectedClosingCash;
       session.closingCash = closing;
       session.cashVariance = cashVariance;
-      session.reconciliationStatus = "completed";
-      session.reconciliationSessionIds = reconciliationSessions.map((entry) => entry._id);
       session.closeNotes = notes || session.closeNotes;
       session.closedBy = userId;
       session.updatedBy = userId;
@@ -306,6 +300,211 @@ router.post(
     } catch (error) {
       console.error("Close shift session error:", error);
       res.status(500).json({ success: false, message: "Failed to close shift" });
+    }
+  }
+);
+
+router.get(
+  "/:id/preview",
+  requirePermission(PERMISSIONS.CREATE_SALE),
+  async (req, res) => {
+    try {
+      const { organizationId } = req.user;
+      const session = await ShiftSession.findOne({ _id: req.params.id, organizationId }).lean();
+      if (!session) {
+        return res.status(404).json({ success: false, message: "Shift session not found" });
+      }
+
+      const now = new Date();
+      const expectedCashSales = await computeExpectedCashSales({
+        organizationId,
+        locationId: session.locationId,
+        cashierId: session.cashierId,
+        openedAt: session.openedAt,
+        closedAt: now,
+      });
+
+      const cashExpenseTotal = await computeCashExpenseTotal({
+        organizationId,
+        locationId: session.locationId,
+        shiftSessionId: session._id,
+        cashierId: session.cashierId,
+        openedAt: session.openedAt,
+        closedAt: now,
+      });
+
+      const openingCash = roundMoney(session.openingCash || 0);
+      const expectedClosingCash = calculateExpectedClosingCash({ openingCash, expectedCashSales, cashExpenseTotal });
+
+      res.json({
+        success: true,
+        data: {
+          expectedCashSales,
+          cashExpenseTotal,
+          expectedClosingCash,
+        },
+      });
+    } catch (error) {
+      console.error("Preview shift close error:", error);
+      res.status(500).json({ success: false, message: "Failed to preview shift close" });
+    }
+  }
+);
+
+/**
+ * GET /shifts/:id/transactions
+ * Fetch all transactions (sales, expenses, deliveries) for a shift with optional filtering
+ * Query params: validationStatus (pending|validated|disputed)
+ */
+router.get(
+  "/:id/transactions",
+  requirePermission(PERMISSIONS.VIEW_FINANCIAL_REPORTS),
+  async (req, res) => {
+    try {
+      const { organizationId } = req.user;
+      const { id: shiftId } = req.params;
+      const { validationStatus, type } = req.query;
+      const { page, limit, skip } = normalizePagination(req);
+
+      // Verify shift exists
+      const shift = await ShiftSession.findOne({ _id: shiftId, organizationId }).lean();
+      if (!shift) {
+        return res.status(404).json({
+          success: false,
+          message: "Shift session not found",
+        });
+      }
+
+      // Build base query for all transaction types
+      const baseQuery = {
+        organizationId,
+        shiftSessionId: shiftId,
+      };
+
+      // Apply validation status filter if provided
+      if (validationStatus) {
+        if (!["pending", "validated", "disputed"].includes(validationStatus)) {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid validationStatus. Must be one of: pending, validated, disputed",
+          });
+        }
+        baseQuery.validationStatus = validationStatus;
+      }
+
+      // Fetch transactions from all types (unless specific type is requested)
+      const fetchAllTypes = !type || type === "all";
+      const transactions = [];
+
+      // Fetch sales
+      if (fetchAllTypes || type === "sale") {
+        const sales = await Sale.find(baseQuery)
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .lean();
+        
+        transactions.push(
+          ...sales.map((sale) => ({
+            _id: sale._id,
+            type: "sale",
+            receiptNumber: sale.receiptNumber,
+            totalAmount: sale.totalAmount,
+            validationStatus: sale.validationStatus,
+            validatedBy: sale.validatedBy,
+            validatedAt: sale.validatedAt,
+            validationNotes: sale.validationNotes,
+            createdAt: sale.createdAt,
+            cashierId: sale.cashierId,
+          }))
+        );
+      }
+
+      // Fetch expenses
+      if (fetchAllTypes || type === "expense") {
+        const expenses = await Expense.find(baseQuery)
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .lean();
+        
+        transactions.push(
+          ...expenses.map((expense) => ({
+            _id: expense._id,
+            type: "expense",
+            category: expense.category,
+            description: expense.description,
+            amount: expense.amount,
+            validationStatus: expense.validationStatus,
+            validatedBy: expense.validatedBy,
+            validatedAt: expense.validatedAt,
+            validationNotes: expense.validationNotes,
+            createdAt: expense.createdAt,
+            createdBy: expense.createdBy,
+          }))
+        );
+      }
+
+      // Fetch deliveries
+      if (fetchAllTypes || type === "delivery") {
+        const DeliveryFee = require("../models/DeliveryFee");
+        const deliveries = await DeliveryFee.find(baseQuery)
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .lean();
+        
+        transactions.push(
+          ...deliveries.map((delivery) => ({
+            _id: delivery._id,
+            type: "delivery",
+            recipientName: delivery.recipientName,
+            amount: delivery.amount,
+            deliveryCategory: delivery.deliveryCategory,
+            validationStatus: delivery.validationStatus,
+            validatedBy: delivery.validatedBy,
+            validatedAt: delivery.validatedAt,
+            validationNotes: delivery.validationNotes,
+            createdAt: delivery.createdAt,
+            createdBy: delivery.createdBy,
+          }))
+        );
+      }
+
+      // Sort by createdAt descending
+      transactions.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+      // Get total counts
+      const [salesCount, expenseCount, deliveryCount] = await Promise.all([
+        Sale.countDocuments(baseQuery),
+        Expense.countDocuments(baseQuery),
+        require("../models/DeliveryFee").countDocuments(baseQuery),
+      ]);
+
+      const totalCount = salesCount + expenseCount + deliveryCount;
+
+      return res.json({
+        success: true,
+        data: {
+          shiftId,
+          page,
+          limit,
+          total: totalCount,
+          breakdown: {
+            sales: salesCount,
+            expenses: expenseCount,
+            deliveries: deliveryCount,
+          },
+          transactions,
+        },
+      });
+    } catch (error) {
+      console.error("Get shift transactions error:", error);
+      return res.status(500).json({
+        success: false,
+        message: "Failed to fetch transactions",
+        error: error.message,
+      });
     }
   }
 );

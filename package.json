@@ -7,6 +7,9 @@
     "dev": "nodemon index.js",
     "salt": "nodemon crypto.js",
     "start": "node index.js",
+    "test:shift-session-calculations": "node tests/shift-session-calculations.check.js",
+    "test:shift-expense-sync": "node tests/shift-expense-sync.scenario.js",
+    "test:reconciliation-auto-attach": "node tests/reconciliation-auto-attach.check.js",
     "backfill:sale-payment-timestamps": "node scripts/backfill-sale-payment-timestamps.js",
     "backfill:sale-payment-timestamps:apply": "node scripts/backfill-sale-payment-timestamps.js --apply",
     "backfill:sale-tax-config": "node scripts/backfill-sale-tax-config.js",
@@ -14,7 +17,8 @@
     "backfill:sale-created-at": "node scripts/backfill-sale-created-at.js",
     "backfill:sale-created-at:apply": "node scripts/backfill-sale-created-at.js --apply",
     "sales:created-at": "node scripts/list-sales-created-at.js",
-    "sales:created-at:apply": "node scripts/list-sales-created-at.js --apply"
+    "sales:created-at:apply": "node scripts/list-sales-created-at.js --apply",
+    "sales:by-day": "node scripts/list-sales-by-day.js"
   },
   "keywords": [],
   "author": "",
