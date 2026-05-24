@@ -5,8 +5,10 @@ const ExpenseApproval = require("../models/ExpenseApproval");
 const AccountingPeriod = require("../models/AccountingPeriod");
 const JournalEntry = require("../models/JournalEntry");
 const Location = require("../models/Location");
+const ShiftSession = require("../models/ShiftSession");
 const { requirePermission } = require("../middleware/permissionCheck");
 const { PERMISSIONS } = require("../config/permissions");
+const { buildShiftExpenseMatch, calculateExpectedClosingCash } = require("../utils/shiftSessionCalculations");
 
 const roundMoney = (value) => Math.round((Number(value) || 0) * 100) / 100;
 
@@ -37,6 +39,124 @@ const findPostingPeriod = async ({ organizationId, locationId, expenseDate }) =>
     startDate: { $lte: expenseDate },
     endDate: { $gte: expenseDate },
   }).sort({ locationId: -1, startDate: -1 });
+};
+
+const findOpenShiftSession = async ({ organizationId, locationId, cashierId }) => {
+  return ShiftSession.findOne({
+    organizationId,
+    locationId,
+    cashierId,
+    status: "open",
+  }).lean();
+};
+
+const logShiftExpenseSync = (event, payload = {}) => {
+  console.info(`[SHIFT_EXPENSE_SYNC] ${event}`, payload);
+};
+
+const computeCashExpenseTotal = async ({ organizationId, locationId, shiftSessionId, cashierId, openedAt, closedAt }) => {
+  const aggregateResult = await Expense.aggregate([
+    {
+      $match: buildShiftExpenseMatch({ organizationId, locationId, shiftSessionId, cashierId, openedAt, closedAt }),
+    },
+    {
+      $group: {
+        _id: null,
+        total: { $sum: "$amount" },
+      },
+    },
+  ]);
+
+  return roundMoney(aggregateResult[0]?.total || 0);
+};
+
+const refreshOpenShiftTotalsById = async ({ organizationId, shiftSessionId }) => {
+  if (!shiftSessionId) {
+    logShiftExpenseSync("refresh.skip.no-shift-id", {
+      organizationId: String(organizationId),
+    });
+    return;
+  }
+
+  const session = await ShiftSession.findOne({
+    _id: shiftSessionId,
+    organizationId,
+    status: "open",
+  });
+
+  if (!session) {
+    logShiftExpenseSync("refresh.skip.shift-not-open-or-missing", {
+      organizationId: String(organizationId),
+      shiftSessionId: String(shiftSessionId),
+    });
+    return;
+  }
+
+  const now = new Date();
+  const cashExpenseTotal = await computeCashExpenseTotal({
+    organizationId,
+    locationId: session.locationId,
+    shiftSessionId: session._id,
+    cashierId: session.cashierId,
+    openedAt: session.openedAt,
+    closedAt: now,
+  });
+
+  const expectedClosingCash = calculateExpectedClosingCash({
+    openingCash: roundMoney(session.openingCash || 0),
+    expectedCashSales: roundMoney(session.expectedCashSales || 0),
+    cashExpenseTotal,
+  });
+
+  session.cashExpenseTotal = cashExpenseTotal;
+  session.expectedClosingCash = expectedClosingCash;
+  await session.save();
+
+  logShiftExpenseSync("refresh.applied", {
+    organizationId: String(organizationId),
+    shiftSessionId: String(session._id),
+    cashierId: String(session.cashierId),
+    locationId: String(session.locationId),
+    cashExpenseTotal,
+    expectedClosingCash,
+  });
+};
+
+const refreshShiftTotalsAfterExpenseMutation = async ({
+  organizationId,
+  shiftSessionIds = [],
+  expenseId,
+  action,
+}) => {
+  const uniqueIds = [...new Set(shiftSessionIds.filter(Boolean).map((id) => String(id)))];
+
+  logShiftExpenseSync("refresh.start", {
+    organizationId: String(organizationId),
+    expenseId: expenseId ? String(expenseId) : undefined,
+    action,
+    shiftSessionIds: uniqueIds,
+  });
+
+  await Promise.all(
+    uniqueIds.map(async (shiftSessionId) => {
+      try {
+        await refreshOpenShiftTotalsById({ organizationId, shiftSessionId });
+      } catch (error) {
+        console.error("Shift total refresh error:", {
+          organizationId: String(organizationId),
+          shiftSessionId,
+          error: error.message,
+        });
+      }
+    })
+  );
+
+  logShiftExpenseSync("refresh.complete", {
+    organizationId: String(organizationId),
+    expenseId: expenseId ? String(expenseId) : undefined,
+    action,
+    refreshedShiftSessionIds: uniqueIds,
+  });
 };
 
 const buildPostingWarning = (warningType, message) => ({
@@ -195,6 +315,22 @@ router.post(
         return res.status(404).json({ success: false, message: "Location not found" });
       }
 
+      // All expenses require an open shift session
+      const openShift = await findOpenShiftSession({ organizationId, locationId, cashierId: userId });
+      if (!openShift) {
+        return res.status(400).json({
+          success: false,
+          message: "All expenses require an open shift at this location",
+        });
+      }
+      const shiftSessionId = openShift._id;
+      logShiftExpenseSync("expense.create.linked-to-shift", {
+        organizationId: String(organizationId),
+        userId: String(userId),
+        locationId: String(locationId),
+        shiftSessionId: String(shiftSessionId),
+      });
+
       if (["approved", "rejected"].includes(status)) {
         return res.status(400).json({
           success: false,
@@ -217,10 +353,19 @@ router.post(
         vendorName,
         reference,
         notes,
+        shiftSessionId,
+        validationStatus: "pending",
         submittedAt: resolvedStatus === "submitted" ? new Date() : undefined,
         submittedBy: resolvedStatus === "submitted" ? userId : undefined,
         createdBy: userId,
         updatedBy: userId,
+      });
+
+      await refreshShiftTotalsAfterExpenseMutation({
+        organizationId,
+        shiftSessionIds: [shiftSessionId],
+        expenseId: expense._id,
+        action: "expense.create",
       });
 
       if (resolvedStatus === "submitted") {
@@ -320,6 +465,42 @@ router.patch(
         "notes",
       ];
 
+      const previousShiftSessionId = expense.shiftSessionId;
+
+      const paymentMethodChanged = req.body.paymentMethod !== undefined;
+      if (paymentMethodChanged) {
+        if (req.body.paymentMethod === "cash") {
+          const openShift = await findOpenShiftSession({
+            organizationId,
+            locationId: expense.locationId,
+            cashierId: userId,
+          });
+
+          if (!openShift) {
+            return res.status(400).json({
+              success: false,
+              message: "Cash expenses require an open shift at this location",
+            });
+          }
+
+          expense.shiftSessionId = openShift._id;
+          logShiftExpenseSync("expense.update.linked-to-shift", {
+            organizationId: String(organizationId),
+            expenseId: String(expense._id),
+            shiftSessionId: String(openShift._id),
+            paymentMethod: "cash",
+          });
+        } else {
+          expense.shiftSessionId = undefined;
+          logShiftExpenseSync("expense.update.unlinked-from-shift", {
+            organizationId: String(organizationId),
+            expenseId: String(expense._id),
+            previousShiftSessionId: previousShiftSessionId ? String(previousShiftSessionId) : undefined,
+            paymentMethod: req.body.paymentMethod,
+          });
+        }
+      }
+
       fields.forEach((field) => {
         if (req.body[field] !== undefined) {
           expense[field] = field === "amount" ? roundMoney(req.body[field]) : req.body[field];
@@ -347,6 +528,13 @@ router.patch(
 
       expense.updatedBy = userId;
       await expense.save();
+
+      await refreshShiftTotalsAfterExpenseMutation({
+        organizationId,
+        shiftSessionIds: [previousShiftSessionId, expense.shiftSessionId],
+        expenseId: expense._id,
+        action: "expense.update",
+      });
 
       return res.json({ success: true, message: "Expense updated", data: expense });
     } catch (error) {
@@ -381,6 +569,13 @@ router.post(
       expense.submittedBy = userId;
       expense.updatedBy = userId;
       await expense.save();
+
+      await refreshShiftTotalsAfterExpenseMutation({
+        organizationId,
+        shiftSessionIds: [expense.shiftSessionId],
+        expenseId: expense._id,
+        action: "expense.submit",
+      });
 
       await createApprovalRecord({
         organizationId,
@@ -422,6 +617,13 @@ router.post(
       expense.approvedBy = userId;
       expense.updatedBy = userId;
       await expense.save();
+
+      await refreshShiftTotalsAfterExpenseMutation({
+        organizationId,
+        shiftSessionIds: [expense.shiftSessionId],
+        expenseId: expense._id,
+        action: "expense.approve",
+      });
 
       await createApprovalRecord({
         organizationId,
@@ -478,6 +680,13 @@ router.post(
       expense.rejectionReason = reason;
       expense.updatedBy = userId;
       await expense.save();
+
+      await refreshShiftTotalsAfterExpenseMutation({
+        organizationId,
+        shiftSessionIds: [expense.shiftSessionId],
+        expenseId: expense._id,
+        action: "expense.reject",
+      });
 
       await createApprovalRecord({
         organizationId,

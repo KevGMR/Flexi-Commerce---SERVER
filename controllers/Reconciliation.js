@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const ReconciliationSession = require("../models/ReconciliationSession");
+const ShiftSession = require("../models/ShiftSession");
 const Sale = require("../models/Sale");
 const Location = require("../models/Location");
 const { requirePermission } = require("../middleware/permissionCheck");
@@ -17,15 +18,23 @@ const normalizePagination = (req) => {
   return { page, limit, skip };
 };
 
+const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
 const toDateRange = ({ startDate, endDate }) => {
   const start = startDate ? new Date(startDate) : new Date();
   const end = endDate ? new Date(endDate) : new Date(start);
 
-  if (!startDate) {
+  // If startDate is date-only (YYYY-MM-DD) treat it as start-of-day
+  if (startDate && DATE_ONLY_RE.test(startDate)) {
+    start.setHours(0, 0, 0, 0);
+  } else if (!startDate) {
     start.setHours(0, 0, 0, 0);
   }
 
-  if (!endDate) {
+  // If endDate is date-only (YYYY-MM-DD) treat it as end-of-day
+  if (endDate && DATE_ONLY_RE.test(endDate)) {
+    end.setHours(23, 59, 59, 999);
+  } else if (!endDate) {
     end.setHours(23, 59, 59, 999);
   }
 
@@ -60,17 +69,13 @@ const extractSalePayments = (sale) => {
   return [];
 };
 
-const computeExpectedByMethod = async ({ organizationId, locationId, cashierId, start, end }) => {
+const computeExpectedByMethod = async ({ organizationId, locationId, start, end }) => {
   const query = {
     organizationId,
     locationId,
     createdAt: { $gte: start, $lte: end },
     status: { $ne: "voided" },
   };
-
-  if (cashierId) {
-    query.cashierId = cashierId;
-  }
 
   const sales = await Sale.find(query)
     .select("payments paymentMethod totalAmount status")
@@ -101,6 +106,175 @@ const computeExpectedByMethod = async ({ organizationId, locationId, cashierId, 
   );
 
   return { expectedByMethod, totalExpected };
+};
+
+const collectShiftBreakdown = (shiftSessions) =>
+  shiftSessions.map((session) => ({
+    shiftSessionId: session._id,
+    shiftCode: session.shiftCode,
+    cashierId: session.cashierId,
+    status: session.status,
+    openedAt: session.openedAt,
+    closedAt: session.closedAt,
+    openingCash: roundMoney(session.openingCash),
+    expectedCashSales: roundMoney(session.expectedCashSales),
+    cashExpenseTotal: roundMoney(session.cashExpenseTotal),
+    expectedClosingCash: roundMoney(session.expectedClosingCash),
+    closingCash: roundMoney(session.closingCash),
+    cashVariance: roundMoney(session.cashVariance),
+  }));
+
+const collectShiftSessionsForWindow = async ({ organizationId, locationId, start, end }) => {
+  return ShiftSession.find({
+    organizationId,
+    locationId,
+    openedAt: { $lte: end },
+    $or: [{ status: "open" }, { closedAt: { $gte: start } }],
+  })
+    .sort({ openedAt: 1 })
+    .lean();
+};
+
+const buildShiftBreakdownEntry = (shiftSession) => ({
+  shiftSessionId: shiftSession._id,
+  shiftCode: shiftSession.shiftCode,
+  cashierId: shiftSession.cashierId,
+  status: shiftSession.status,
+  openedAt: shiftSession.openedAt,
+  closedAt: shiftSession.closedAt,
+  openingCash: roundMoney(shiftSession.openingCash),
+  expectedCashSales: roundMoney(shiftSession.expectedCashSales),
+  cashExpenseTotal: roundMoney(shiftSession.cashExpenseTotal),
+  expectedClosingCash: roundMoney(shiftSession.expectedClosingCash),
+  closingCash: roundMoney(shiftSession.closingCash),
+  cashVariance: roundMoney(shiftSession.cashVariance),
+});
+
+const mergeCountedByMethod = ({ expectedByMethod, existingCountedByMethod }) => {
+  const expectedMap = new Map((expectedByMethod || []).map((row) => [row.method, Number(row.expectedAmount) || 0]));
+  const countedMap = new Map((existingCountedByMethod || []).map((row) => [row.method, row]));
+
+  const orderedMethods = PAYMENT_METHODS.filter((method) => expectedMap.has(method) || countedMap.has(method));
+
+  return orderedMethods
+    .map((method) => {
+      const existingRow = countedMap.get(method) || {};
+      const expectedAmount = roundMoney(expectedMap.get(method) || 0);
+      const countedAmount = roundMoney(Number(existingRow.countedAmount) || 0);
+      const settledAmount = roundMoney(
+        existingRow.settledAmount === undefined ? countedAmount : Number(existingRow.settledAmount) || 0
+      );
+      const varianceAmount = roundMoney(countedAmount - expectedAmount);
+
+      return {
+        method,
+        expectedAmount,
+        countedAmount,
+        settledAmount,
+        varianceAmount,
+        reference: existingRow.reference || undefined,
+        notes: existingRow.notes || undefined,
+      };
+    })
+    .filter(
+      (row) =>
+        row.expectedAmount > 0 ||
+        row.countedAmount > 0 ||
+        row.settledAmount > 0 ||
+        row.reference ||
+        row.notes
+    );
+};
+
+const attachShiftToEligibleReconciliationSession = async ({
+  organizationId,
+  locationId,
+  openedAt,
+  shiftSession,
+  userId,
+}) => {
+  if (!organizationId || !locationId || !openedAt || !shiftSession?._id) {
+    return { attached: false, reason: "invalid-input" };
+  }
+
+  const eligibleSessions = await ReconciliationSession.find({
+    organizationId,
+    locationId,
+    windowStart: { $lte: openedAt },
+    windowEnd: { $gte: openedAt },
+    status: { $in: ["open", "needs_review"] },
+  }).sort({ windowStart: -1, createdAt: -1 });
+
+  if (!eligibleSessions.length) {
+    return { attached: false, reason: "no-eligible-session" };
+  }
+
+  if (eligibleSessions.length > 1) {
+    console.warn("Multiple eligible reconciliation sessions found for shift attach", {
+      organizationId: String(organizationId),
+      locationId: String(locationId),
+      openedAt: new Date(openedAt).toISOString(),
+      reconciliationSessionIds: eligibleSessions.map((session) => String(session._id)),
+    });
+  }
+
+  const reconciliationSession = eligibleSessions[0];
+  const shiftId = String(shiftSession._id);
+
+  const hasShiftId = (reconciliationSession.shiftSessionIds || []).some((id) => String(id) === shiftId);
+  if (!hasShiftId) {
+    reconciliationSession.shiftSessionIds.push(shiftSession._id);
+  }
+
+  const hasBreakdown = (reconciliationSession.shiftBreakdown || []).some(
+    (row) => String(row.shiftSessionId) === shiftId
+  );
+  if (!hasBreakdown) {
+    reconciliationSession.shiftBreakdown.push(buildShiftBreakdownEntry(shiftSession));
+  }
+
+  const { expectedByMethod, totalExpected } = await computeExpectedByMethod({
+    organizationId,
+    locationId,
+    start: reconciliationSession.windowStart,
+    end: reconciliationSession.windowEnd,
+  });
+
+  reconciliationSession.expectedByMethod = expectedByMethod;
+  reconciliationSession.countedByMethod = mergeCountedByMethod({
+    expectedByMethod,
+    existingCountedByMethod: reconciliationSession.countedByMethod,
+  });
+  reconciliationSession.totalExpected = totalExpected;
+  reconciliationSession.totalCounted = roundMoney(
+    (reconciliationSession.countedByMethod || []).reduce((sum, row) => sum + (Number(row.countedAmount) || 0), 0)
+  );
+  reconciliationSession.totalVariance = roundMoney(
+    Number(reconciliationSession.totalCounted) - Number(reconciliationSession.totalExpected)
+  );
+  reconciliationSession.updatedBy = userId || reconciliationSession.updatedBy;
+  await reconciliationSession.save();
+
+  await ShiftSession.updateOne(
+    {
+      _id: shiftSession._id,
+      organizationId,
+    },
+    {
+      $addToSet: {
+        reconciliationSessionIds: reconciliationSession._id,
+      },
+      $set: {
+        updatedBy: userId || shiftSession.updatedBy,
+      },
+    }
+  );
+
+  return {
+    attached: !hasShiftId || !hasBreakdown,
+    reconciliationSessionId: reconciliationSession._id,
+    status: reconciliationSession.status,
+  };
 };
 
 router.get(
@@ -147,7 +321,7 @@ router.post(
   async (req, res) => {
     try {
       const { organizationId, userId } = req.user;
-      const { locationId, cashierId, startDate, endDate, varianceThreshold, notes } = req.body;
+      const { locationId, startDate, endDate, varianceThreshold, notes } = req.body;
 
       if (!locationId) {
         return res.status(400).json({ success: false, message: "locationId is required" });
@@ -159,10 +333,28 @@ router.post(
       }
 
       const { start, end } = toDateRange({ startDate, endDate });
+
+      // Prevent creating multiple reconciliation sessions that overlap the same window
+      const existing = await ReconciliationSession.findOne({
+        organizationId,
+        locationId,
+        windowStart: { $lte: end },
+        windowEnd: { $gte: start },
+      }).lean();
+
+      if (existing) {
+        return res.status(400).json({
+          success: false,
+          code: "RECONCILIATION_EXISTS",
+          message: "A reconciliation session already exists for the selected window",
+          data: { existingSessionId: existing._id, sessionCode: existing.sessionCode },
+        });
+      }
+
+      const shiftSessions = await collectShiftSessionsForWindow({ organizationId, locationId, start, end });
       const { expectedByMethod, totalExpected } = await computeExpectedByMethod({
         organizationId,
         locationId,
-        cashierId,
         start,
         end,
       });
@@ -172,10 +364,11 @@ router.post(
       const session = await ReconciliationSession.create({
         organizationId,
         locationId,
-        cashierId: cashierId || undefined,
         sessionCode,
         windowStart: start,
         windowEnd: end,
+        shiftSessionIds: shiftSessions.map((shift) => shift._id),
+        shiftBreakdown: collectShiftBreakdown(shiftSessions),
         expectedByMethod,
         countedByMethod: expectedByMethod.map((row) => ({
           method: row.method,
@@ -215,7 +408,9 @@ router.get(
       const session = await ReconciliationSession.findOne({
         _id: req.params.id,
         organizationId,
-      }).lean();
+      })
+        .populate("shiftBreakdown.cashierId", "fullname email")
+        .lean();
 
       if (!session) {
         return res.status(404).json({ success: false, message: "Session not found" });
@@ -291,6 +486,21 @@ router.post(
 
       await session.save();
 
+      if (Array.isArray(session.shiftSessionIds) && session.shiftSessionIds.length > 0) {
+        await ShiftSession.updateMany(
+          { _id: { $in: session.shiftSessionIds }, organizationId },
+          {
+            $set: {
+              reconciliationStatus: "completed",
+              updatedBy: userId,
+            },
+            $addToSet: {
+              reconciliationSessionIds: session._id,
+            },
+          }
+        );
+      }
+
       res.json({
         success: true,
         message: "Reconciliation submitted",
@@ -304,3 +514,6 @@ router.post(
 );
 
 module.exports = router;
+// Export helper for unit testing
+module.exports.toDateRange = toDateRange;
+module.exports.attachShiftToEligibleReconciliationSession = attachShiftToEligibleReconciliationSession;
