@@ -33,6 +33,7 @@ const driverRouter = require("./controllers/Driver");
 const expenseRouter = require("./controllers/Expense");
 const shiftSessionRouter = require("./controllers/ShiftSession");
 const reconciliationRouter = require("./controllers/Reconciliation");
+const transactionValidationRouter = require("./controllers/TransactionValidation");
 
 const { verifyToken } = require("./middleware/auth");
 const { checkUserStatus } = require("./middleware/userStatusCheck");
@@ -94,7 +95,10 @@ mongoose
       startLinkOfflineDeliveriesToSales();
     });
   })
-  .catch((err) => console.log({ databaseConnect: err }));
+  .catch((err) => {
+    console.error("[startup] Failed to connect to MongoDB:", err.message);
+    process.exit(1);
+  });
 
 // Health Check Endpoint (Public)
 app.get("/health", (req, res) => {
@@ -147,6 +151,7 @@ app.use("/drivers", verifyToken, checkUserStatus, driverRouter);
 app.use("/expenses", verifyToken, checkUserStatus, expenseRouter);
 app.use("/shift-sessions", verifyToken, checkUserStatus, shiftSessionRouter);
 app.use("/reconciliation", verifyToken, checkUserStatus, reconciliationRouter);
+app.use("/transactions", verifyToken, checkUserStatus, transactionValidationRouter);
 
 // 404 Handler
 app.use((req, res) => {

@@ -467,6 +467,70 @@ const createSale = async (req, res) => {
         subtotal += lineTotal;
         totalTax += lineTax;
         totalDiscount += lineDiscount;
+      } else if (item.type === "service") {
+        const product = await Product.findOne({
+          _id: item.productId,
+          organizationId,
+        });
+        if (!product) {
+          return res.status(404).json({
+            success: false,
+            message: `Service product ${item.productId} not found`,
+          });
+        }
+
+        if (product.type !== "service") {
+          return res.status(400).json({
+            success: false,
+            message: `Product ${item.productId} is not a service`,
+          });
+        }
+
+        const serviceBundleComponents = Array.isArray(product.serviceBundleComponents)
+          ? product.serviceBundleComponents.map((component) => {
+              const componentQuantity = Number(component.quantity) || 1;
+              const componentUnitPrice = Number(component.priceSnapshot) || 0;
+              return {
+                serviceProductId: component.serviceProductId,
+                productName: component.nameSnapshot || "",
+                sku: component.skuSnapshot || "",
+                quantity: componentQuantity,
+                unitPrice: componentUnitPrice,
+                lineTotal: roundMoney(componentQuantity * componentUnitPrice),
+              };
+            })
+          : [];
+
+        const lineTotal = item.quantity * item.unitPrice;
+        const lineDiscount = item.discount || 0;
+        const taxableAmount = Math.max(0, lineTotal - lineDiscount);
+        const lineTax = calculateLineTax({
+          taxableAmount,
+          taxRate,
+          taxMode,
+        });
+
+        enrichedItems.push({
+          type: "service",
+          productId: item.productId,
+          productName: product.name,
+          sku: product.sku,
+          quantity: item.quantity,
+          unitPrice: item.unitPrice,
+          lineTotal,
+          discount: lineDiscount,
+          taxAmount: lineTax,
+          serviceBundle: {
+            isBundle:
+              product.serviceKind === "bundle" || serviceBundleComponents.length > 0,
+            bundleName: product.name,
+            components: serviceBundleComponents,
+          },
+        });
+
+        subtotal += lineTotal;
+        totalTax += lineTax;
+        totalDiscount += lineDiscount;
       } else if (item.type === "shopify") {
         // Shopify items - just snapshot what was provided
         if (!item.shopifyVariantId || !item.productName) {
@@ -504,7 +568,7 @@ const createSale = async (req, res) => {
       } else {
         return res.status(400).json({
           success: false,
-          message: 'Item type must be "flexi" or "shopify"',
+          message: 'Item type must be "flexi", "service", or "shopify"',
         });
       }
     }
@@ -759,6 +823,22 @@ const createSale = async (req, res) => {
       }
     }
 
+    // Verify an open shift session exists for this cashier at this location
+    const ShiftSession = require("../models/ShiftSession");
+    const openShift = await ShiftSession.findOne({
+      organizationId,
+      locationId,
+      cashierId: req.user.userId,
+      status: "open",
+    }).lean();
+
+    if (!openShift) {
+      return res.status(400).json({
+        success: false,
+        message: "All sales require an open shift at this location",
+      });
+    }
+
     // Generate receipt and transaction numbers
     const receiptNumber = `REC-${organizationId}-${Date.now()}`;
     const transactionId = `TXN-${organizationId}-${Date.now()}`;
@@ -799,6 +879,9 @@ const createSale = async (req, res) => {
         payments: normalizedPayments,
         paymentStatus: overallPaymentStatus,
         cashierId: req.user.userId,
+        // Shift Management & Audit
+        shiftSessionId: openShift._id,
+        validationStatus: "pending",
         status: "completed",
         completedAt: new Date(),
         inventoryStatus: "pending",

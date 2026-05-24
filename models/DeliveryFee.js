@@ -16,6 +16,11 @@ const deliveryFeeSchema = new Schema(
       required: true,
       index: true,
     },
+    shiftSessionId: {
+      type: Schema.Types.ObjectId,
+      ref: "ShiftSession",
+      index: true,
+    },
     saleId: {
       type: Schema.Types.ObjectId,
       ref: "Sale",
@@ -110,6 +115,20 @@ const deliveryFeeSchema = new Schema(
       type: Schema.Types.ObjectId,
       ref: "User",
     },
+    // Transaction Audit & Validation
+    validationStatus: {
+      type: String,
+      enum: ["pending", "validated", "disputed"],
+      default: "pending",
+      index: true,
+    },
+    validatedBy: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      sparse: true,
+    },
+    validatedAt: Date,
+    validationNotes: String,
   },
   { timestamps: true }
 );
@@ -119,6 +138,7 @@ deliveryFeeSchema.index({ organizationId: 1, categoryStatus: 1, createdAt: -1 })
 deliveryFeeSchema.index({ organizationId: 1, locationId: 1, createdAt: -1 });
 deliveryFeeSchema.index({ organizationId: 1, driverId: 1, categoryStatus: 1 });
 deliveryFeeSchema.index({ organizationId: 1, createdAt: -1 });
+deliveryFeeSchema.index({ shiftSessionId: 1, validationStatus: 1 }); // Shift deliveries & validation
 // Note: saleId and trackingNumber already have indexes via field-level definitions
 
 // Pre-save middleware to generate tracking number

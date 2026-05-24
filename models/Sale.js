@@ -37,11 +37,28 @@ const saleSchema = new mongoose.Schema(
       {
         type: {
           type: String,
-          enum: ["flexi", "shopify"],
+          enum: ["flexi", "shopify", "service"],
           required: true,
         },
         productId: mongoose.Schema.Types.ObjectId, // FLEXI product ref (if type=flexi)
         shopifyVariantId: String, // Shopify variant ref (if type=shopify)
+        serviceBundle: {
+          isBundle: {
+            type: Boolean,
+            default: false,
+          },
+          bundleName: String,
+          components: [
+            {
+              serviceProductId: mongoose.Schema.Types.ObjectId,
+              productName: String,
+              sku: String,
+              quantity: Number,
+              unitPrice: Number,
+              lineTotal: Number,
+            },
+          ],
+        },
         productName: String, // Snapshot
         sku: String, // Snapshot
         quantity: {
@@ -329,6 +346,28 @@ const saleSchema = new mongoose.Schema(
       default: "pending",
     },
 
+    // Shift Management
+    shiftSessionId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "ShiftSession",
+      index: true,
+    },
+
+    // Transaction Audit & Validation
+    validationStatus: {
+      type: String,
+      enum: ["pending", "validated", "disputed"],
+      default: "pending",
+      index: true,
+    },
+    validatedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      sparse: true,
+    },
+    validatedAt: Date,
+    validationNotes: String,
+
     // Staff
     cashierId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -396,6 +435,7 @@ saleSchema.index({ shopifySyncStatus: 1 }); // Find failed Shopify syncs
 saleSchema.index({ "items.type": 1, createdAt: -1 }); // Filter by catalog type
 saleSchema.index({ totalAmount: 1, createdAt: -1 }); // Revenue reports
 saleSchema.index({ deliveryStatus: 1, createdAt: -1 }); // Track delivery status
+saleSchema.index({ shiftSessionId: 1, validationStatus: 1 }); // Shift transactions & validation
 // Note: deliveryFeeId already has index via field-level definition
 saleSchema.index(
   { organizationId: 1, idempotencyKey: 1 },

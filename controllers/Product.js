@@ -14,10 +14,34 @@ const { logTokenEvent } = require("../services/auditLogger");
 router.post("/", verifyToken, async (req, res) => {
   try {
     const organizationId = req.user.organizationId;
-    const { name, description, sku, type, price, compareAtPrice, cost, weight, weightUnit, tags, images, vendor } = req.body;
+    const {
+      name,
+      description,
+      sku,
+      type,
+      serviceKind,
+      serviceBundleComponents,
+      trackInventory,
+      price,
+      compareAtPrice,
+      cost,
+      weight,
+      weightUnit,
+      tags,
+      images,
+      vendor,
+    } = req.body;
 
-    if (!name || !sku || !price) {
+    if (!name || !sku || price === undefined || price === null) {
       return res.status(400).json({ error: "name, sku, and price are required" });
+    }
+
+    if (type === "service" && serviceKind === "bundle") {
+      if (!Array.isArray(serviceBundleComponents) || serviceBundleComponents.length === 0) {
+        return res.status(400).json({
+          error: "serviceBundleComponents are required when creating a bundled service",
+        });
+      }
     }
 
     // Check SKU uniqueness per org
@@ -32,6 +56,10 @@ router.post("/", verifyToken, async (req, res) => {
       description,
       sku,
       type: type || "physical",
+      serviceKind: type === "service" ? serviceKind || "single" : "single",
+      serviceBundleComponents: Array.isArray(serviceBundleComponents)
+        ? serviceBundleComponents
+        : [],
       price,
       compareAtPrice,
       cost,
@@ -40,6 +68,7 @@ router.post("/", verifyToken, async (req, res) => {
       tags,
       images,
       vendor,
+      trackInventory: type === "service" ? false : trackInventory,
       createdBy: req.user.userId,
     });
 
@@ -63,10 +92,11 @@ router.post("/", verifyToken, async (req, res) => {
 router.get("/", verifyToken, async (req, res) => {
   try {
     const organizationId = req.user.organizationId;
-    const { status, search, skip = 0, limit = 50 } = req.query;
+    const { status, search, type, skip = 0, limit = 50 } = req.query;
 
     let query = { organizationId };
     if (status) query.status = status;
+    if (type) query.type = type;
     if (search) query.name = new RegExp(search, "i");
 
     const products = await Product.find(query)
@@ -113,7 +143,24 @@ router.get("/:id", verifyToken, async (req, res) => {
 router.put("/:id", verifyToken, async (req, res) => {
   try {
     const organizationId = req.user.organizationId;
-    const { name, description, sku, type, price, compareAtPrice, cost, weight, weightUnit, tags, images, vendor, status } = req.body;
+    const {
+      name,
+      description,
+      sku,
+      type,
+      serviceKind,
+      serviceBundleComponents,
+      trackInventory,
+      price,
+      compareAtPrice,
+      cost,
+      weight,
+      weightUnit,
+      tags,
+      images,
+      vendor,
+      status,
+    } = req.body;
 
     const product = await Product.findOne({ _id: req.params.id, organizationId });
     if (!product) {
@@ -132,7 +179,12 @@ router.put("/:id", verifyToken, async (req, res) => {
     if (name) product.name = name;
     if (description !== undefined) product.description = description;
     if (type) product.type = type;
-    if (price) product.price = price;
+    if (serviceKind) product.serviceKind = serviceKind;
+    if (serviceBundleComponents !== undefined) product.serviceBundleComponents = Array.isArray(serviceBundleComponents) ? serviceBundleComponents : [];
+    if (trackInventory !== undefined) {
+      product.trackInventory = trackInventory;
+    }
+    if (price !== undefined) product.price = price;
     if (compareAtPrice !== undefined) product.compareAtPrice = compareAtPrice;
     if (cost !== undefined) product.cost = cost;
     if (weight !== undefined) product.weight = weight;
@@ -141,6 +193,16 @@ router.put("/:id", verifyToken, async (req, res) => {
     if (images) product.images = images;
     if (vendor) product.vendor = vendor;
     if (status) product.status = status;
+
+    if (product.type === "service") {
+      product.trackInventory = false;
+      if (!product.serviceKind) product.serviceKind = "single";
+      if (product.serviceKind === "bundle" && (!product.serviceBundleComponents || product.serviceBundleComponents.length === 0)) {
+        return res.status(400).json({
+          error: "serviceBundleComponents are required when saving a bundled service",
+        });
+      }
+    }
 
     await product.save();
 

@@ -1,4 +1,5 @@
 const cron = require("node-cron");
+const mongoose = require("mongoose");
 const Sale = require("../models/Sale");
 const DeliveryFee = require("../models/DeliveryFee");
 
@@ -20,6 +21,13 @@ let errorCount = 0;
  */
 
 const linkOfflineDeliveriesToSales = async () => {
+  if (mongoose.connection.readyState !== 1) {
+    console.log(
+      "[LinkOfflineDeliveries] MongoDB is not connected, skipping this cycle"
+    );
+    return { linked: 0, errors: 0, skipped: true };
+  }
+
   // Prevent overlapping runs
   if (isRunning) {
     console.log(

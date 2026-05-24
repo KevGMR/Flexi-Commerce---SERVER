@@ -23,9 +23,33 @@ const productSchema = new Schema(
     },
     type: {
       type: String,
-      enum: ["physical", "digital"],
+      enum: ["physical", "digital", "service"],
       default: "physical",
     },
+    serviceKind: {
+      type: String,
+      enum: ["single", "bundle"],
+      default: "single",
+    },
+    serviceBundleComponents: [
+      {
+        serviceProductId: {
+          type: Schema.Types.ObjectId,
+          ref: "Product",
+        },
+        quantity: {
+          type: Number,
+          default: 1,
+          min: 1,
+        },
+        nameSnapshot: String,
+        skuSnapshot: String,
+        priceSnapshot: {
+          type: Number,
+          min: 0,
+        },
+      },
+    ],
     status: {
       type: String,
       enum: ["active", "archived", "draft"],

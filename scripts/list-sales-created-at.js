@@ -9,11 +9,11 @@ const hasFlag = (flag) => process.argv.includes(flag);
 
 // Replace these with the sale IDs you want to inspect.
 const saleIds = [
-  "69dde3edc9076cdc1b40e440", "69dde42ac9076cdc1b40e46d", "69dde566c9076cdc1b40e4c3", "69dde810c9076cdc1b40e554", "69dde8a2c9076cdc1b40e58b", "69dde8f7c9076cdc1b40e5c4", "69ddf0dfc9076cdc1b40e81e"
+  "69ddf420c9076cdc1b40e894","69ddf496c9076cdc1b40e8c8","69ddf4c7c9076cdc1b40e8fa","69ddf509c9076cdc1b40e927","69ddf5f8c9076cdc1b40e96b","69ddf723c9076cdc1b40e9ce","69ddf8adc9076cdc1b40ea33","69ddf8e9c9076cdc1b40ea65","69ddf9c0c9076cdc1b40eaa0","69ddfa96c9076cdc1b40eaea","69ddfb23c9076cdc1b40eb3d","69ddfb5cc9076cdc1b40eb89","69ddfb9ec9076cdc1b40ebb8"
 ];
 
 // Change this value to control the backdated day of the month.
-const targetDayOfMonth = 10;
+const targetDayOfMonth = 11;
 
 const DATE_DETAIL_SEPARATOR = " | ";
 

@@ -60,6 +60,10 @@ const shiftSessionSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    cashExpenseTotal: {
+      type: Number,
+      default: 0,
+    },
     reconciliationStatus: {
       type: String,
       enum: ["pending", "completed"],

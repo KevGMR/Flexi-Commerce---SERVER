@@ -94,6 +94,11 @@ const expenseSchema = new mongoose.Schema(
       ref: "JournalEntry",
       index: true,
     },
+    shiftSessionId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "ShiftSession",
+      index: true,
+    },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -103,19 +108,33 @@ const expenseSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
     },
+    // Transaction Audit & Validation
+    validationStatus: {
+      type: String,
+      enum: ["pending", "validated", "disputed"],
+      default: "pending",
+      index: true,
+    },
+    validatedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      sparse: true,
+    },
+    validatedAt: Date,
+    validationNotes: String,
   },
   { timestamps: true }
 );
 
 expenseSchema.index({ organizationId: 1, locationId: 1, expenseDate: -1 });
 expenseSchema.index({ organizationId: 1, status: 1, createdAt: -1 });
+expenseSchema.index({ shiftSessionId: 1, validationStatus: 1 }); // Shift expenses & validation
 
-expenseSchema.pre("validate", function preValidate(next) {
+expenseSchema.pre("validate", function preValidate() {
   if (!this.expenseCode) {
     const orgSuffix = String(this.organizationId || "ORG").slice(-6).toUpperCase();
     this.expenseCode = `EXP-${orgSuffix}-${Date.now()}`;
   }
-  next();
 });
 
 module.exports = mongoose.model("Expense", expenseSchema);

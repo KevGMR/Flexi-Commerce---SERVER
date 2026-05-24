@@ -6,6 +6,7 @@ const Sale = require("../models/Sale");
 const Receivable = require("../models/Receivable");
 const Location = require("../models/Location");
 const Driver = require("../models/Driver");
+const ShiftSession = require("../models/ShiftSession");
 const { requirePermission } = require("../middleware/permissionCheck");
 const { validateLocationAccess, getUserAccessibleLocations } = require("../middleware/locationAccess");
 
@@ -90,6 +91,21 @@ const createDeliveryFee = async (req, res) => {
         success: false,
         message:
           "Missing required fields: locationId, deliveryCategory, deliveryOption, deliveryAddress, recipientName, recipientPhone",
+      });
+    }
+
+    // Verify an open shift session exists for this cashier at this location
+    const openShift = await ShiftSession.findOne({
+      organizationId,
+      locationId,
+      cashierId: userId,
+      status: "open",
+    }).lean();
+
+    if (!openShift) {
+      return res.status(400).json({
+        success: false,
+        message: "All deliveries require an open shift at this location",
       });
     }
 
@@ -187,6 +203,7 @@ const createDeliveryFee = async (req, res) => {
     const deliveryFee = new DeliveryFee({
       organizationId,
       locationId,
+      shiftSessionId: openShift._id,
       saleId: saleId || undefined,
       deliveryCategory: deliveryCategory || undefined,
       deliveryOption: deliveryOption || undefined,
@@ -202,6 +219,7 @@ const createDeliveryFee = async (req, res) => {
       notes: notes || undefined,
       deliveryInstructions: deliveryInstructions || undefined,
       categoryStatus: categoryStatus || undefined,
+      validationStatus: "pending",
       createdBy: userId,
     });
 

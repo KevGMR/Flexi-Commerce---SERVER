@@ -43,6 +43,12 @@ const reconciliationSessionSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    shiftSessionIds: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "ShiftSession",
+      },
+    ],
     cashierId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -70,6 +76,34 @@ const reconciliationSessionSchema = new mongoose.Schema(
     },
     countedByMethod: {
       type: [reconciliationLineSchema],
+      default: [],
+    },
+    shiftBreakdown: {
+      type: [
+        new mongoose.Schema(
+          {
+            shiftSessionId: {
+              type: mongoose.Schema.Types.ObjectId,
+              ref: "ShiftSession",
+            },
+            shiftCode: String,
+            cashierId: {
+              type: mongoose.Schema.Types.ObjectId,
+              ref: "User",
+            },
+            status: String,
+            openedAt: Date,
+            closedAt: Date,
+            openingCash: Number,
+            expectedCashSales: Number,
+            cashExpenseTotal: Number,
+            expectedClosingCash: Number,
+            closingCash: Number,
+            cashVariance: Number,
+          },
+          { _id: false }
+        ),
+      ],
       default: [],
     },
     totalExpected: {

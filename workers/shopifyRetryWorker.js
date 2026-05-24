@@ -1,4 +1,5 @@
 const cron = require('node-cron');
+const mongoose = require('mongoose');
 const { processRetryQueue } = require('../services/shopifySync');
 
 /**
@@ -11,6 +12,11 @@ let isRunning = false;
 
 // Schedule job to run every 5 minutes
 const retryWorker = cron.schedule('*/5 * * * *', async () => {
+  if (mongoose.connection.readyState !== 1) {
+    console.log('[Shopify Retry Worker] MongoDB is not connected, skipping this cycle');
+    return;
+  }
+
   // Prevent overlapping runs
   if (isRunning) {
     console.log('[Shopify Retry Worker] Previous job still running, skipping...');
