@@ -1,5 +1,6 @@
 const User = require("../models/User");
 const UserOrganization = require("../models/UserOrganization");
+const { getEffectivePermissionsForMembership } = require("../utils/effectivePermissions");
 const { isCriticalPermission } = require("../config/permissions");
 const { logPermissionDenied } = require("../services/auditLogger");
 
@@ -79,8 +80,21 @@ const requirePermission = (permission) => {
           });
         }
       } else {
-        // For non-critical permissions, trust JWT
-        if (!permissions || !permissions.includes(permission)) {
+        // For non-critical permissions, trust JWT first, then fall back to live org membership
+        const hasJwtPermission = permissions && permissions.includes(permission);
+
+        if (!hasJwtPermission) {
+          const effectiveMembership = organizationId
+            ? await getEffectivePermissionsForMembership({ userId, organizationId })
+            : null;
+
+          if (effectiveMembership?.permissions?.includes(permission)) {
+            req.user.permissions = effectiveMembership.permissions;
+            req.user.role = effectiveMembership.membership.role;
+            next();
+            return;
+          }
+
           await logPermissionDenied(
             userId,
             permission,
@@ -113,7 +127,7 @@ const requirePermission = (permission) => {
 const requireAnyPermission = (permissions) => {
   return async (req, res, next) => {
     try {
-      const { userId, permissions: userPermissions } = req.user;
+      const { userId, organizationId, permissions: userPermissions } = req.user;
 
       // Check if any permission is critical
       const hasCritical = permissions.some((p) => isCriticalPermission(p));
@@ -155,10 +169,28 @@ const requireAnyPermission = (permissions) => {
           });
         }
       } else {
-        // Trust JWT for non-critical
-        const hasPermission = permissions.some((p) =>
+        // Trust JWT for non-critical, then fall back to live org membership
+        let hasPermission = permissions.some((p) =>
           userPermissions && userPermissions.includes(p)
         );
+
+        if (!hasPermission && organizationId) {
+          const effectiveMembership = await getEffectivePermissionsForMembership({
+            userId,
+            organizationId,
+          });
+
+          if (effectiveMembership?.permissions?.length) {
+            hasPermission = permissions.some((p) =>
+              effectiveMembership.permissions.includes(p)
+            );
+
+            if (hasPermission) {
+              req.user.permissions = effectiveMembership.permissions;
+              req.user.role = effectiveMembership.membership.role;
+            }
+          }
+        }
 
         if (!hasPermission) {
           await logPermissionDenied(
@@ -193,7 +225,7 @@ const requireAnyPermission = (permissions) => {
 const requireAllPermissions = (permissions) => {
   return async (req, res, next) => {
     try {
-      const { userId, permissions: userPermissions } = req.user;
+      const { userId, organizationId, permissions: userPermissions } = req.user;
 
       // Check if any permission is critical
       const hasCritical = permissions.some((p) => isCriticalPermission(p));
@@ -235,10 +267,28 @@ const requireAllPermissions = (permissions) => {
           });
         }
       } else {
-        // Trust JWT for non-critical
-        const hasAllPermissions = permissions.every((p) =>
+        // Trust JWT for non-critical, then fall back to live org membership
+        let hasAllPermissions = permissions.every((p) =>
           userPermissions && userPermissions.includes(p)
         );
+
+        if (!hasAllPermissions && organizationId) {
+          const effectiveMembership = await getEffectivePermissionsForMembership({
+            userId,
+            organizationId,
+          });
+
+          if (effectiveMembership?.permissions?.length) {
+            hasAllPermissions = permissions.every((p) =>
+              effectiveMembership.permissions.includes(p)
+            );
+
+            if (hasAllPermissions) {
+              req.user.permissions = effectiveMembership.permissions;
+              req.user.role = effectiveMembership.membership.role;
+            }
+          }
+        }
 
         if (!hasAllPermissions) {
           await logPermissionDenied(

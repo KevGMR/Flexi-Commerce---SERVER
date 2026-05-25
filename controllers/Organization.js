@@ -9,6 +9,7 @@ const Invitation = require("../models/Invitation");
 const User = require("../models/User");
 const { getPermissionsForRole, PERMISSIONS } = require("../config/permissions");
 const { verifyToken, requireOrganization } = require("../middleware/auth");
+const { getEffectivePermissionsForMembership } = require("../utils/effectivePermissions");
 const { logTokenEvent } = require("../services/auditLogger");
 const { sendOrganizationInvitation } = require("../services/emailNotifier");
 const { loginLimiter } = require("../middleware/rateLimiter");
@@ -39,8 +40,18 @@ router.get("/:organizationId", verifyToken, async (req, res) => {
       return res.status(403).json({ error: "No access to this organization" });
     }
 
+    const effectiveMembership = await getEffectivePermissionsForMembership({
+      userId: req.user.userId,
+      organizationId: req.params.organizationId,
+    });
+
     return res.status(200).json({
-      organization: org,
+      organization: {
+        ...org,
+        role: effectiveMembership?.membership?.role || membership.role,
+        permissions: effectiveMembership?.permissions || membership.permissions || [],
+        locations: effectiveMembership?.membership?.locations || membership.locations || [],
+      },
     });
   } catch (error) {
     console.error("Error fetching organization:", error);
