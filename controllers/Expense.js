@@ -598,10 +598,7 @@ router.post(
   requirePermission(PERMISSIONS.MANAGE_FINANCE),
   async (req, res) => {
     try {
-      const { organizationId, userId, role } = req.user;
-      if (!isPrivilegedRole(role)) {
-        return res.status(403).json({ success: false, message: "Only managers can approve expenses" });
-      }
+      const { organizationId, userId } = req.user;
 
       const expense = await Expense.findOne({ _id: req.params.id, organizationId });
       if (!expense) {
@@ -655,10 +652,7 @@ router.post(
   requirePermission(PERMISSIONS.MANAGE_FINANCE),
   async (req, res) => {
     try {
-      const { organizationId, userId, role } = req.user;
-      if (!isPrivilegedRole(role)) {
-        return res.status(403).json({ success: false, message: "Only managers can reject expenses" });
-      }
+      const { organizationId, userId } = req.user;
 
       const { reason, notes } = req.body || {};
       if (!reason) {

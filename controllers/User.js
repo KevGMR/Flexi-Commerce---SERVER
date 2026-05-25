@@ -17,7 +17,7 @@ const { sendEmailVerification, sendPasswordReset, sendOrganizationInvitation } =
 const { verifyToken, verifyRefreshTokenMiddleware, extractDeviceId, requireOrganization } = require("../middleware/auth");
 const { checkUserStatus } = require("../middleware/userStatusCheck");
 const { loginLimiter, registrationLimiter, refreshLimiter, passwordResetLimiter } = require("../middleware/rateLimiter");
-const { getEffectivePermissionsForMembership } = require("../utils/effectivePermissions");
+const { getEffectivePermissionsForMembership, getMembershipPermissionsForRole } = require("../utils/effectivePermissions");
 
 const saltRounds = Number(process.env.SALT) || 10;
 
@@ -175,8 +175,8 @@ router.post("/new", registrationLimiter, async (req, res) => {
 
       userRole = invitation.role;
 
-      // Add user to organization
-      const permissions = getPermissionsForRole(userRole);
+      // Add user to organization with live role permissions
+      const permissions = await getMembershipPermissionsForRole(userRole);
       await UserOrganization.create({
         userId: user._id,
         organizationId: organization._id,
@@ -205,8 +205,8 @@ router.post("/new", registrationLimiter, async (req, res) => {
 
       await organization.save();
 
-      // Add user as Owner
-      const ownerPermissions = getPermissionsForRole("Owner");
+      // Add user as Owner with live role permissions
+      const ownerPermissions = await getMembershipPermissionsForRole("Owner");
       await UserOrganization.create({
         userId: user._id,
         organizationId: organization._id,
@@ -786,8 +786,8 @@ router.post("/create-organization", verifyToken, async (req, res) => {
 
     await organization.save();
 
-    // Add user as Owner
-    const ownerPermissions = getPermissionsForRole("Owner");
+    // Add user as Owner with live role permissions
+    const ownerPermissions = await getMembershipPermissionsForRole("Owner");
     await UserOrganization.create({
       userId: req.user.userId,
       organizationId: organization._id,
