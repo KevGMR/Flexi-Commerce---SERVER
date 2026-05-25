@@ -17,6 +17,7 @@ const { sendEmailVerification, sendPasswordReset, sendOrganizationInvitation } =
 const { verifyToken, verifyRefreshTokenMiddleware, extractDeviceId, requireOrganization } = require("../middleware/auth");
 const { checkUserStatus } = require("../middleware/userStatusCheck");
 const { loginLimiter, registrationLimiter, refreshLimiter, passwordResetLimiter } = require("../middleware/rateLimiter");
+const { getEffectivePermissionsForMembership } = require("../utils/effectivePermissions");
 
 const saltRounds = Number(process.env.SALT) || 10;
 
@@ -339,11 +340,18 @@ router.post("/login", loginLimiter, extractDeviceId, async (req, res) => {
         });
       }
 
+      const effectiveMembership = await getEffectivePermissionsForMembership({
+        userId: user._id,
+        organizationId,
+      });
+
+      const orgPermissions = effectiveMembership?.permissions || membership.permissions;
+
       // Generate org-scoped tokens
       const accessToken = generateAccessToken(
         user._id,
         membership.role,
-        membership.permissions,
+        orgPermissions,
         req.deviceId,
         organizationId
       );
@@ -391,7 +399,7 @@ router.post("/login", loginLimiter, extractDeviceId, async (req, res) => {
           name: membership.organizationId.name,
           slug: membership.organizationId.slug,
           role: membership.role,
-          permissions: membership.permissions,
+          permissions: orgPermissions,
           locations: membership.locations || [],
         },
       });
@@ -462,11 +470,18 @@ router.post("/refresh", refreshLimiter, extractDeviceId, verifyRefreshTokenMiddl
 
 
     // Rotate token with latest permissions from organization
+    const effectiveMembership = await getEffectivePermissionsForMembership({
+      userId: user._id,
+      organizationId: tokenDoc.organizationId,
+    });
+
+    const orgPermissions = effectiveMembership?.permissions || membership.permissions;
+
     const { accessToken, refreshToken: newRefreshToken } = await rotateRefreshToken(
       refreshToken,
       user._id,
       membership.role,
-      membership.permissions,
+      orgPermissions,
       req.deviceId,
       req.ip,
       req.get("user-agent"),
@@ -840,11 +855,18 @@ router.post("/switch-organization", verifyToken, extractDeviceId, async (req, re
       return res.status(403).json({ error: "Organization not active" });
     }
 
+    const effectiveMembership = await getEffectivePermissionsForMembership({
+      userId: req.user.userId,
+      organizationId,
+    });
+
+    const orgPermissions = effectiveMembership?.permissions || membership.permissions;
+
     // Generate new tokens for new organization
     const accessToken = generateAccessToken(
       user._id,
       membership.role,
-      membership.permissions,
+      orgPermissions,
       req.deviceId,
       organizationId
     );
@@ -881,7 +903,7 @@ router.post("/switch-organization", verifyToken, extractDeviceId, async (req, re
         name: org.name,
         slug: org.slug,
         role: membership.role,
-        permissions: membership.permissions,
+        permissions: orgPermissions,
         locations: membership.locations || [],
       },
     });
