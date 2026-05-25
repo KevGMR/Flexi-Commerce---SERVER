@@ -9,7 +9,7 @@ const Invitation = require("../models/Invitation");
 const User = require("../models/User");
 const { getPermissionsForRole, PERMISSIONS } = require("../config/permissions");
 const { verifyToken, requireOrganization } = require("../middleware/auth");
-const { getEffectivePermissionsForMembership } = require("../utils/effectivePermissions");
+const { getEffectivePermissionsForMembership, getMembershipPermissionsForRole } = require("../utils/effectivePermissions");
 const { logTokenEvent } = require("../services/auditLogger");
 const { sendOrganizationInvitation } = require("../services/emailNotifier");
 const { loginLimiter } = require("../middleware/rateLimiter");
@@ -214,7 +214,8 @@ router.post("/:organizationId/invite", verifyToken, async (req, res) => {
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + 7); // 7 day expiry
 
-    const permissions = getPermissionsForRole(role);
+    // Use live role permissions for invitations
+    const permissions = await getMembershipPermissionsForRole(role);
 
     const invitation = new Invitation({
       organizationId: req.params.organizationId,
