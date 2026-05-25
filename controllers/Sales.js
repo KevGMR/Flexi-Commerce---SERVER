@@ -2567,6 +2567,12 @@ const getSalesSummary = async (req, res) => {
     salesAmountExcludingDelivery = roundMoney(salesAmountExcludingDelivery);
     netSalesExcludingTax = roundMoney(netSalesExcludingTax);
     preDiscountSales = roundMoney(preDiscountSales);
+    // New: Subtotal excluding both exchange credit and discounts
+    let subtotalExclCreditAndDiscount = Math.max(
+      0,
+      preDiscountSales - exchangeCreditApplied - totalDiscount,
+    );
+    subtotalExclCreditAndDiscount = roundMoney(subtotalExclCreditAndDiscount);
     const roundedFlexiCount = Math.round(fleximCount);
     const roundedShopifyCount = Math.round(shopifyCount);
 
@@ -2625,7 +2631,7 @@ const getSalesSummary = async (req, res) => {
 
     res.json({
       success: true,
-      data: {
+        data: {
         totalSales: transactionCount,
         totalRevenue,
         grossRevenue,
@@ -2634,6 +2640,7 @@ const getSalesSummary = async (req, res) => {
         salesAmountExcludingDelivery,
         netSalesExcludingTax,
         preDiscountSales,
+          subtotalExclCreditAndDiscount,
         totalTax,
         totalDiscount,
         deliveryAmountCollected,
