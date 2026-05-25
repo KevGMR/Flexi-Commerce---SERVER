@@ -14,6 +14,7 @@ const {
   queueInventoryUpdate,
 } = require("../services/shopifySync");
 const Inventory = require("../models/Inventory");
+const Expense = require("../models/Expense");
 const { requirePermission } = require("../middleware/permissionCheck");
 const { validateLocationAccess } = require("../middleware/locationAccess");
 
@@ -22,6 +23,18 @@ const PAYMENT_METHODS = ["cash", "card", "mobile", "check", "credit", "mpesa"];
 const INTERNAL_CREDIT_PAYMENT_METHODS = new Set(["credit"]);
 
 const roundMoney = (value) => Math.round((Number(value) || 0) * 100) / 100;
+
+const toObjectIdIfValid = (value) => {
+  if (!value) {
+    return value;
+  }
+
+  if (typeof value === "string" && mongoose.Types.ObjectId.isValid(value)) {
+    return new mongoose.Types.ObjectId(value);
+  }
+
+  return value;
+};
 
 const deriveSalePaymentStatus = (payments = [], totalAmount = 0) => {
   const total = roundMoney(totalAmount);
@@ -2557,6 +2570,43 @@ const getSalesSummary = async (req, res) => {
     const roundedFlexiCount = Math.round(fleximCount);
     const roundedShopifyCount = Math.round(shopifyCount);
 
+    // Aggregate approved expenses for the requested period/location
+    let totalExpenses = 0;
+    try {
+      const normalizedOrganizationId = toObjectIdIfValid(organizationId);
+      const normalizedLocationId = toObjectIdIfValid(locationId);
+
+      const expenseFilter = {
+        organizationId: normalizedOrganizationId,
+        status: "approved",
+      };
+
+      if (normalizedLocationId) {
+        expenseFilter.locationId = normalizedLocationId;
+      }
+
+      if (startDateObj || endDateObj) {
+        const dateRange = {};
+        if (startDateObj) dateRange.$gte = startDateObj;
+        if (endDateObj) dateRange.$lte = endDateObj;
+
+        expenseFilter.$or = [
+          { expenseDate: dateRange },
+          { expenseDate: { $exists: false }, createdAt: dateRange },
+        ];
+      }
+
+      const expenseAgg = await Expense.aggregate([
+        { $match: expenseFilter },
+        { $group: { _id: null, total: { $sum: "$amount" } } },
+      ]);
+
+      totalExpenses = roundMoney(expenseAgg[0]?.total || 0);
+    } catch (expErr) {
+      console.error("Failed to aggregate expenses for sales summary:", expErr);
+      totalExpenses = 0;
+    }
+
     const modeEntries = Object.entries(taxModeBreakdown)
       .map(([mode, totals]) => ({
         mode,
@@ -2587,6 +2637,14 @@ const getSalesSummary = async (req, res) => {
         totalTax,
         totalDiscount,
         deliveryAmountCollected,
+        // Expenses (approved) for the requested range/location
+        totalExpenses,
+        netProfitAfterExpenses:
+          typeof totalExpenses !== "undefined"
+            ? roundMoney(netSalesExcludingTax - totalExpenses)
+            : null,
+        expenseToRevenueRatio:
+          grossRevenue > 0 ? roundMoney((totalExpenses / grossRevenue) * 100) : 0,
         taxDisplayMode,
         taxModeBreakdown: {
           inclusive: modeEntries.find((entry) => entry.mode === "inclusive") || {
