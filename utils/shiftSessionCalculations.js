@@ -14,6 +14,57 @@ const toObjectIdIfValid = (value) => {
   return value;
 };
 
+const getLocalDayStart = (referenceDate = new Date()) => {
+  return new Date(
+    referenceDate.getFullYear(),
+    referenceDate.getMonth(),
+    referenceDate.getDate(),
+    0,
+    0,
+    0,
+    0,
+  );
+};
+
+const determineShiftCloseTiming = ({ openedAt, transactionTimestamps = [], now = new Date() }) => {
+  const nowDate = now instanceof Date ? now : new Date(now);
+  const openedAtDate = openedAt instanceof Date ? openedAt : new Date(openedAt);
+  const validTransactionTimes = transactionTimestamps
+    .map((timestamp) => (timestamp instanceof Date ? timestamp : new Date(timestamp)))
+    .filter((timestamp) => !Number.isNaN(timestamp.getTime()))
+    .map((timestamp) => timestamp.getTime());
+
+  const latestTransactionMs = validTransactionTimes.length > 0 ? Math.max(...validTransactionTimes) : null;
+  const closeTimeMs = latestTransactionMs === null
+    ? nowDate.getTime()
+    : Math.max(openedAtDate.getTime(), Math.min(latestTransactionMs, nowDate.getTime()));
+  const closeTime = new Date(closeTimeMs);
+
+  return {
+    closeTime,
+    closeBackdated: closeTime.getTime() < nowDate.getTime(),
+    closedAtRecordedAt: nowDate,
+  };
+};
+
+const findPreviousDayOpenShiftSession = async ({ ShiftSession, organizationId, locationId, cashierId, referenceDate = new Date() }) => {
+  if (!ShiftSession || !organizationId || !locationId || !cashierId) {
+    return null;
+  }
+
+  const dayStart = getLocalDayStart(referenceDate);
+
+  return ShiftSession.findOne({
+    organizationId,
+    locationId,
+    cashierId,
+    status: "open",
+    openedAt: { $lt: dayStart },
+  })
+    .sort({ openedAt: -1 })
+    .lean();
+};
+
 const getSaleCashPaymentsTotal = (sale) => {
   let cashTotal = 0;
 
@@ -66,4 +117,6 @@ module.exports = {
   getSaleCashPaymentsTotal,
   buildShiftExpenseMatch,
   calculateExpectedClosingCash,
+  determineShiftCloseTiming,
+  findPreviousDayOpenShiftSession,
 };

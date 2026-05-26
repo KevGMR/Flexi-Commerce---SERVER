@@ -38,6 +38,12 @@ const shiftSessionSchema = new mongoose.Schema(
       default: Date.now,
     },
     closedAt: Date,
+    closedAtRecordedAt: Date,
+    closeBackdated: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
     openingCash: {
       type: Number,
       default: 0,

@@ -3,6 +3,7 @@ const {
   getSaleCashPaymentsTotal,
   buildShiftExpenseMatch,
   calculateExpectedClosingCash,
+  determineShiftCloseTiming,
 } = require("../utils/shiftSessionCalculations");
 
 const refundSale = {
@@ -56,6 +57,43 @@ assert.strictEqual(
   calculateExpectedClosingCash({ openingCash: 100, expectedCashSales: 70, cashExpenseTotal: 25 }),
   145,
   "expected closing cash should subtract expenses from opening cash plus sales"
+);
+
+const backdatedTiming = determineShiftCloseTiming({
+  openedAt: new Date("2026-05-23T08:00:00.000Z"),
+  transactionTimestamps: [
+    new Date("2026-05-23T10:15:00.000Z"),
+    new Date("2026-05-23T14:45:00.000Z"),
+  ],
+  now: new Date("2026-05-24T09:00:00.000Z"),
+});
+
+assert.strictEqual(
+  backdatedTiming.closeTime.toISOString(),
+  "2026-05-23T14:45:00.000Z",
+  "shift close time should backdate to the latest transaction time"
+);
+assert.strictEqual(
+  backdatedTiming.closeBackdated,
+  true,
+  "shift close timing should flag backdated closes"
+);
+
+const sameDayTiming = determineShiftCloseTiming({
+  openedAt: new Date("2026-05-23T08:00:00.000Z"),
+  transactionTimestamps: [],
+  now: new Date("2026-05-23T16:00:00.000Z"),
+});
+
+assert.strictEqual(
+  sameDayTiming.closeTime.toISOString(),
+  "2026-05-23T16:00:00.000Z",
+  "shift close time should use server time when there are no transactions"
+);
+assert.strictEqual(
+  sameDayTiming.closeBackdated,
+  false,
+  "shift close timing should not flag same-day closes as backdated"
 );
 
 console.log("shift-session-calculations: OK");

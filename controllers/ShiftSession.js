@@ -3,6 +3,7 @@ const router = express.Router();
 const ShiftSession = require("../models/ShiftSession");
 const Expense = require("../models/Expense");
 const Sale = require("../models/Sale");
+const DeliveryFee = require("../models/DeliveryFee");
 const Location = require("../models/Location");
 const { generateZReportForShiftSession } = require("../services/zReportService");
 const { requirePermission } = require("../middleware/permissionCheck");
@@ -12,6 +13,7 @@ const {
   getSaleCashPaymentsTotal,
   buildShiftExpenseMatch,
   calculateExpectedClosingCash,
+  determineShiftCloseTiming,
 } = require("../utils/shiftSessionCalculations");
 const { attachShiftToEligibleReconciliationSession } = require("./Reconciliation");
 
@@ -20,6 +22,12 @@ const normalizePagination = (req) => {
   const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
   const skip = (page - 1) * limit;
   return { page, limit, skip };
+};
+
+const parseDateParam = (value) => {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 };
 
 const computeExpectedCashSales = async ({ organizationId, locationId, cashierId, openedAt, closedAt }) => {
@@ -86,6 +94,57 @@ router.get(
     } catch (error) {
       console.error("Get current shift session error:", error);
       res.status(500).json({ success: false, message: "Failed to fetch current shift" });
+    }
+  }
+);
+
+router.get(
+  "/open/previous-day",
+  requirePermission(PERMISSIONS.CREATE_SALE),
+  async (req, res) => {
+    try {
+      const { organizationId, userId } = req.user;
+      const { locationId, dayStart } = req.query;
+
+      if (!locationId || !dayStart) {
+        return res.status(400).json({
+          success: false,
+          message: "locationId and dayStart are required",
+        });
+      }
+
+      const boundary = parseDateParam(dayStart);
+      if (!boundary) {
+        return res.status(400).json({
+          success: false,
+          message: "dayStart must be a valid ISO date",
+        });
+      }
+
+      const session = await ShiftSession.findOne({
+        organizationId,
+        locationId,
+        cashierId: userId,
+        status: "open",
+        openedAt: { $lt: boundary },
+      })
+        .sort({ openedAt: -1 })
+        .lean();
+
+      return res.json({
+        success: true,
+        data: {
+          hasPreviousDayOpenShift: Boolean(session),
+          shift: session || null,
+          dayStart: boundary.toISOString(),
+        },
+      });
+    } catch (error) {
+      console.error("Get previous-day open shift error:", error);
+      return res.status(500).json({
+        success: false,
+        message: "Failed to check previous-day shift status",
+      });
     }
   }
 );
@@ -224,7 +283,29 @@ router.post(
         return res.status(403).json({ success: false, message: "You can only close your own shift" });
       }
 
-      const closeTime = new Date();
+      const [salesResult, expensesResult, deliveryFeesResult] = await Promise.all([
+        Sale.aggregate([
+          { $match: { organizationId, locationId: session.locationId, shiftSessionId: session._id } },
+          { $group: { _id: null, max: { $max: "$createdAt" } } },
+        ]),
+        Expense.aggregate([
+          { $match: { organizationId, locationId: session.locationId, shiftSessionId: session._id } },
+          { $group: { _id: null, max: { $max: "$createdAt" } } },
+        ]),
+        DeliveryFee.aggregate([
+          { $match: { organizationId, locationId: session.locationId, shiftSessionId: session._id } },
+          { $group: { _id: null, max: { $max: "$createdAt" } } },
+        ]),
+      ]);
+
+      const { closeTime, closeBackdated, closedAtRecordedAt } = determineShiftCloseTiming({
+        openedAt: session.openedAt,
+        transactionTimestamps: [
+          salesResult[0]?.max,
+          expensesResult[0]?.max,
+          deliveryFeesResult[0]?.max,
+        ],
+      });
 
       const expectedCashSales = await computeExpectedCashSales({
         organizationId,
@@ -249,6 +330,8 @@ router.post(
 
       session.status = "closed";
       session.closedAt = closeTime;
+      session.closedAtRecordedAt = closedAtRecordedAt;
+      session.closeBackdated = closeBackdated;
       session.expectedCashSales = expectedCashSales;
       session.cashExpenseTotal = cashExpenseTotal;
       session.expectedClosingCash = expectedClosingCash;
@@ -294,6 +377,10 @@ router.post(
         message: "Shift closed successfully",
         data: {
           session,
+          closeTimeAudit: {
+            closeBackdated,
+            closedAtRecordedAt,
+          },
           zReportGeneration,
         },
       });

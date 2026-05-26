@@ -838,6 +838,23 @@ const createSale = async (req, res) => {
 
     // Verify an open shift session exists for this cashier at this location
     const ShiftSession = require("../models/ShiftSession");
+    const { findPreviousDayOpenShiftSession } = require("../utils/shiftSessionCalculations");
+    const previousDayOpenShift = await findPreviousDayOpenShiftSession({
+      ShiftSession,
+      organizationId,
+      locationId,
+      cashierId: req.user.userId,
+    });
+
+    if (previousDayOpenShift) {
+      return res.status(403).json({
+        success: false,
+        code: "PREVIOUS_SHIFT_OPEN",
+        message: "Close the previous day's shift before completing a new sale",
+        data: previousDayOpenShift,
+      });
+    }
+
     const openShift = await ShiftSession.findOne({
       organizationId,
       locationId,
@@ -2567,6 +2584,12 @@ const getSalesSummary = async (req, res) => {
     salesAmountExcludingDelivery = roundMoney(salesAmountExcludingDelivery);
     netSalesExcludingTax = roundMoney(netSalesExcludingTax);
     preDiscountSales = roundMoney(preDiscountSales);
+    // New: Subtotal excluding both exchange credit and discounts
+    let subtotalExclCreditAndDiscount = Math.max(
+      0,
+      preDiscountSales - exchangeCreditApplied - totalDiscount,
+    );
+    subtotalExclCreditAndDiscount = roundMoney(subtotalExclCreditAndDiscount);
     const roundedFlexiCount = Math.round(fleximCount);
     const roundedShopifyCount = Math.round(shopifyCount);
 
@@ -2625,7 +2648,7 @@ const getSalesSummary = async (req, res) => {
 
     res.json({
       success: true,
-      data: {
+        data: {
         totalSales: transactionCount,
         totalRevenue,
         grossRevenue,
@@ -2634,6 +2657,7 @@ const getSalesSummary = async (req, res) => {
         salesAmountExcludingDelivery,
         netSalesExcludingTax,
         preDiscountSales,
+          subtotalExclCreditAndDiscount,
         totalTax,
         totalDiscount,
         deliveryAmountCollected,
