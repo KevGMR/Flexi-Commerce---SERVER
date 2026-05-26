@@ -8,7 +8,7 @@ const Location = require("../models/Location");
 const ShiftSession = require("../models/ShiftSession");
 const { requirePermission } = require("../middleware/permissionCheck");
 const { PERMISSIONS } = require("../config/permissions");
-const { buildShiftExpenseMatch, calculateExpectedClosingCash } = require("../utils/shiftSessionCalculations");
+const { buildShiftExpenseMatch, calculateExpectedClosingCash, findPreviousDayOpenShiftSession } = require("../utils/shiftSessionCalculations");
 
 const roundMoney = (value) => Math.round((Number(value) || 0) * 100) / 100;
 
@@ -49,6 +49,8 @@ const findOpenShiftSession = async ({ organizationId, locationId, cashierId }) =
     status: "open",
   }).lean();
 };
+
+const getBlockedShiftMessage = () => "Close the previous day's shift before creating new transactions at this location";
 
 const logShiftExpenseSync = (event, payload = {}) => {
   console.info(`[SHIFT_EXPENSE_SYNC] ${event}`, payload);
@@ -316,6 +318,21 @@ router.post(
       }
 
       // All expenses require an open shift session
+      const previousDayOpenShift = await findPreviousDayOpenShiftSession({
+        ShiftSession,
+        organizationId,
+        locationId,
+        cashierId: userId,
+      });
+      if (previousDayOpenShift) {
+        return res.status(403).json({
+          success: false,
+          code: "PREVIOUS_SHIFT_OPEN",
+          message: getBlockedShiftMessage(),
+          data: previousDayOpenShift,
+        });
+      }
+
       const openShift = await findOpenShiftSession({ organizationId, locationId, cashierId: userId });
       if (!openShift) {
         return res.status(400).json({

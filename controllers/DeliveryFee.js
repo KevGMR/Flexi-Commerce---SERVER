@@ -9,6 +9,7 @@ const Driver = require("../models/Driver");
 const ShiftSession = require("../models/ShiftSession");
 const { requirePermission } = require("../middleware/permissionCheck");
 const { validateLocationAccess, getUserAccessibleLocations } = require("../middleware/locationAccess");
+const { findPreviousDayOpenShiftSession } = require("../utils/shiftSessionCalculations");
 
 const deliveryStatusesRequiringFullPayment = new Set([
   "assigned",
@@ -95,6 +96,22 @@ const createDeliveryFee = async (req, res) => {
     }
 
     // Verify an open shift session exists for this cashier at this location
+    const previousDayOpenShift = await findPreviousDayOpenShiftSession({
+      ShiftSession,
+      organizationId,
+      locationId,
+      cashierId: userId,
+    });
+
+    if (previousDayOpenShift) {
+      return res.status(403).json({
+        success: false,
+        code: "PREVIOUS_SHIFT_OPEN",
+        message: "Close the previous day's shift before creating new transactions at this location",
+        data: previousDayOpenShift,
+      });
+    }
+
     const openShift = await ShiftSession.findOne({
       organizationId,
       locationId,
