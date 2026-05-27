@@ -21,6 +21,12 @@ const normalizePagination = (req) => {
   return { page, limit, skip };
 };
 
+const parseDateParam = (value) => {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
 const createApprovalRecord = async ({ organizationId, expenseId, action, actedBy, notes }) => {
   await ExpenseApproval.create({
     organizationId,
@@ -250,7 +256,7 @@ router.get(
   async (req, res) => {
     try {
       const { organizationId, userId, role } = req.user;
-      const { locationId, status, paymentStatus, category } = req.query;
+      const { locationId, status, paymentStatus, category, startDate, endDate } = req.query;
       const { page, limit, skip } = normalizePagination(req);
 
       const query = { organizationId };
@@ -258,6 +264,15 @@ router.get(
       if (status) query.status = status;
       if (paymentStatus) query.paymentStatus = paymentStatus;
       if (category) query.category = new RegExp(category, "i");
+      if (startDate || endDate) {
+        query.expenseDate = {};
+        if (startDate) query.expenseDate.$gte = parseDateParam(startDate);
+        if (endDate) query.expenseDate.$lte = parseDateParam(endDate);
+
+        if (!query.expenseDate.$gte) delete query.expenseDate.$gte;
+        if (!query.expenseDate.$lte) delete query.expenseDate.$lte;
+        if (Object.keys(query.expenseDate).length === 0) delete query.expenseDate;
+      }
       if (!isPrivilegedRole(role)) query.createdBy = userId;
 
       const [items, total] = await Promise.all([
@@ -409,6 +424,97 @@ router.post(
     } catch (error) {
       console.error("Create expense error:", error);
       return res.status(500).json({ success: false, message: "Failed to create expense" });
+    }
+  }
+);
+
+router.get(
+  "/summary",
+  requirePermission(PERMISSIONS.VIEW_EXPENSES),
+  async (req, res) => {
+    try {
+      const { organizationId, userId, role } = req.user;
+      const { locationId, startDate, endDate } = req.query;
+
+      const match = { organizationId };
+      if (locationId) match.locationId = locationId;
+      if (!isPrivilegedRole(role)) match.createdBy = userId;
+      if (startDate || endDate) {
+        match.expenseDate = {};
+        if (startDate) match.expenseDate.$gte = parseDateParam(startDate);
+        if (endDate) match.expenseDate.$lte = parseDateParam(endDate);
+
+        if (!match.expenseDate.$gte) delete match.expenseDate.$gte;
+        if (!match.expenseDate.$lte) delete match.expenseDate.$lte;
+        if (Object.keys(match.expenseDate).length === 0) delete match.expenseDate;
+      }
+
+      const [totals] = await Expense.aggregate([
+        { $match: match },
+        {
+          $group: {
+            _id: null,
+            totalExpenses: { $sum: "$amount" },
+            approvedExpenses: {
+              $sum: {
+                $cond: [{ $eq: ["$status", "approved"] }, "$amount", 0],
+              },
+            },
+            unapprovedExpenses: {
+              $sum: {
+                $cond: [{ $eq: ["$status", "approved"] }, 0, "$amount"],
+              },
+            },
+            totalCount: { $sum: 1 },
+            approvedCount: {
+              $sum: {
+                $cond: [{ $eq: ["$status", "approved"] }, 1, 0],
+              },
+            },
+            unapprovedCount: {
+              $sum: {
+                $cond: [{ $eq: ["$status", "approved"] }, 0, 1],
+              },
+            },
+            draftCount: {
+              $sum: {
+                $cond: [{ $eq: ["$status", "draft"] }, 1, 0],
+              },
+            },
+            submittedCount: {
+              $sum: {
+                $cond: [{ $eq: ["$status", "submitted"] }, 1, 0],
+              },
+            },
+            rejectedCount: {
+              $sum: {
+                $cond: [{ $eq: ["$status", "rejected"] }, 1, 0],
+              },
+            },
+          },
+        },
+      ]);
+
+      return res.json({
+        success: true,
+        data: {
+          totalExpenses: roundMoney(totals?.totalExpenses || 0),
+          approvedExpenses: roundMoney(totals?.approvedExpenses || 0),
+          unapprovedExpenses: roundMoney(totals?.unapprovedExpenses || 0),
+          totalCount: totals?.totalCount || 0,
+          approvedCount: totals?.approvedCount || 0,
+          unapprovedCount: totals?.unapprovedCount || 0,
+          byStatus: {
+            approved: totals?.approvedCount || 0,
+            draft: totals?.draftCount || 0,
+            submitted: totals?.submittedCount || 0,
+            rejected: totals?.rejectedCount || 0,
+          },
+        },
+      });
+    } catch (error) {
+      console.error("Expense summary error:", error);
+      return res.status(500).json({ success: false, message: "Failed to fetch expense summary" });
     }
   }
 );

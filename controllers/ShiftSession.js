@@ -156,11 +156,20 @@ router.get(
     try {
       const { organizationId, userId, role } = req.user;
       const { page, limit, skip } = normalizePagination(req);
-      const { locationId, status } = req.query;
+      const { locationId, status, startDate, endDate } = req.query;
 
       const query = { organizationId };
       if (locationId) query.locationId = locationId;
       if (status) query.status = status;
+      if (startDate || endDate) {
+        query.openedAt = {};
+        if (startDate) query.openedAt.$gte = parseDateParam(startDate);
+        if (endDate) query.openedAt.$lte = parseDateParam(endDate);
+
+        if (!query.openedAt.$gte) delete query.openedAt.$gte;
+        if (!query.openedAt.$lte) delete query.openedAt.$lte;
+        if (Object.keys(query.openedAt).length === 0) delete query.openedAt;
+      }
 
       if (!["Owner", "Manager"].includes(role)) {
         query.cashierId = userId;
