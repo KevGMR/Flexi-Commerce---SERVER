@@ -2419,6 +2419,7 @@ const getSalesSummary = async (req, res) => {
     let preDiscountSales = 0;
     let deliverySalesCount = 0;
     let fleximCount = 0;
+    let serviceCount = 0;
     let shopifyCount = 0;
     let transactionCount = 0;
 
@@ -2526,6 +2527,7 @@ const getSalesSummary = async (req, res) => {
         for (const item of sale.items || []) {
           const allocatedQty = (Number(item.quantity) || 0) * allocationRatio;
           if (item.type === "flexi") fleximCount += allocatedQty;
+          else if (item.type === "service") serviceCount += allocatedQty;
           else if (item.type === "shopify") shopifyCount += allocatedQty;
         }
       }
@@ -2570,6 +2572,7 @@ const getSalesSummary = async (req, res) => {
 
         for (const item of sale.items || []) {
           if (item.type === "flexi") fleximCount += Number(item.quantity) || 0;
+          else if (item.type === "service") serviceCount += Number(item.quantity) || 0;
           else if (item.type === "shopify") shopifyCount += Number(item.quantity) || 0;
         }
       }
@@ -2591,6 +2594,7 @@ const getSalesSummary = async (req, res) => {
     );
     subtotalExclCreditAndDiscount = roundMoney(subtotalExclCreditAndDiscount);
     const roundedFlexiCount = Math.round(fleximCount);
+    const roundedServiceCount = Math.round(serviceCount);
     const roundedShopifyCount = Math.round(shopifyCount);
 
     // Aggregate approved expenses for the requested period/location
@@ -2699,8 +2703,9 @@ const getSalesSummary = async (req, res) => {
           transactionCount > 0 ? roundMoney(grossRevenue / transactionCount) : 0,
         itemsSold: {
           flexi: roundedFlexiCount,
+          service: roundedServiceCount,
           shopify: roundedShopifyCount,
-          total: roundedFlexiCount + roundedShopifyCount,
+          total: roundedFlexiCount + roundedServiceCount + roundedShopifyCount,
         },
         timeBasis: requestedTimeBasis,
         paymentMethodBreakdown: await getPaymentMethodBreakdown({
