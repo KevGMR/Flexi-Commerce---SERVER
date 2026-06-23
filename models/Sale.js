@@ -32,6 +32,13 @@ const saleSchema = new mongoose.Schema(
       index: true,
     },
 
+    // NEW: Sale-level default assigned user for commission
+    assignedUser: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      index: true,
+    },
+
     // Items Sold
     items: [
       {
@@ -87,6 +94,35 @@ const saleSchema = new mongoose.Schema(
           min: 0,
         },
         taxAmount: {
+          type: Number,
+          default: 0,
+          min: 0,
+        },
+
+        // NEW: Service attachment and commission fields
+        parentItemIndex: {
+          type: Number,
+          default: null, // points to index in the same items array
+        },
+        originalPrice: {
+          type: Number,
+          default: 0, // stores the real unit price for attached products (before zeroing)
+        },
+        assignedUser: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "User",
+          default: null, // service-level override
+        },
+        commissionAmount: {
+          type: Number,
+          default: 0,
+          min: 0,
+        },
+        commissionType: {
+          type: String,
+          enum: ["percentage", "fixed"],
+        },
+        commissionValue: {
           type: Number,
           default: 0,
           min: 0,
@@ -457,5 +493,8 @@ saleSchema.index({
   requiresDelivery: 1,
   deliveryCategory: 1,
 }); // For filtering sales by delivery type in reports
+
+// Additional index for assignedUser
+saleSchema.index({ assignedUser: 1, createdAt: -1 });
 
 module.exports = mongoose.model("Sale", saleSchema);

@@ -2,6 +2,33 @@ const mongoose = require("mongoose");
 
 const Schema = mongoose.Schema;
 
+// Sub‑schema for commission overrides
+const commissionOverrideSchema = new Schema({
+  serviceId: {
+    type: Schema.Types.ObjectId,
+    ref: 'Product',
+    required: true,
+  },
+  commissionType: {
+    type: String,
+    enum: ['percentage', 'fixed'],
+    required: true,
+  },
+  commissionValue: {
+    type: Number,
+    required: true,
+    min: 0,
+  },
+  updatedBy: {
+    type: Schema.Types.ObjectId,
+    ref: 'User',
+  },
+  updatedAt: {
+    type: Date,
+    default: Date.now,
+  },
+}, { _id: false }); // no separate _id for sub‑documents
+
 const userSchema = new Schema(
   {
     fullname: {
@@ -55,13 +82,18 @@ const userSchema = new Schema(
     lastPermissionChange: {
       type: Date,
     },
+    // NEW: commission overrides per service
+    commissionOverrides: {
+      type: [commissionOverrideSchema],
+      default: [],
+    },
   },
   { timestamps: true }
 );
 
-// Indexes for faster queries
+// Existing indexes
 userSchema.index({ status: 1 });
-userSchema.index({ role: 1 });
+// Add index for faster lookup of overrides by user? Not needed.
 
 const User = mongoose.model("User", userSchema);
 

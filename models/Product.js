@@ -50,6 +50,17 @@ const productSchema = new Schema(
         },
       },
     ],
+    // NEW: Commission defaults for services
+    commissionType: {
+      type: String,
+      enum: ["percentage", "fixed"],
+      default: "percentage",
+    },
+    commissionValue: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     status: {
       type: String,
       enum: ["active", "archived", "draft"],

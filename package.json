@@ -7,6 +7,8 @@
     "dev": "nodemon index.js",
     "salt": "nodemon crypto.js",
     "start": "node index.js",
+    "restore:critical-users": "node scripts/restore-critical-users.js",
+    "restore:critical-users:apply": "node scripts/restore-critical-users.js --apply --yes",
     "test:shift-session-calculations": "node tests/shift-session-calculations.check.js",
     "test:shift-expense-sync": "node tests/shift-expense-sync.scenario.js",
     "test:reconciliation-auto-attach": "node tests/reconciliation-auto-attach.check.js",

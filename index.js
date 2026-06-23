@@ -14,6 +14,7 @@ const emailVerificationRouter = require("./controllers/EmailVerification");
 const organizationRouter = require("./controllers/Organization");
 const rolePermissionRouter = require("./controllers/RolePermission");
 const auditLogRouter = require("./controllers/AuditLog");
+const commissionRouter = require("./controllers/Commission");
 
 // E-commerce Controllers (Week 3)
 const productRouter = require("./controllers/Product");
@@ -152,6 +153,9 @@ app.use("/expenses", verifyToken, checkUserStatus, expenseRouter);
 app.use("/shift-sessions", verifyToken, checkUserStatus, shiftSessionRouter);
 app.use("/reconciliation", verifyToken, checkUserStatus, reconciliationRouter);
 app.use("/transactions", verifyToken, checkUserStatus, transactionValidationRouter);
+
+// Commission Routes (Protected)
+app.use("/commissions", verifyToken, checkUserStatus, commissionRouter);
 
 // 404 Handler
 app.use((req, res) => {

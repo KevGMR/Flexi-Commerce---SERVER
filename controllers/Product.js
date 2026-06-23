@@ -30,6 +30,9 @@ router.post("/", verifyToken, async (req, res) => {
       tags,
       images,
       vendor,
+      // NEW: commission fields for services
+      commissionType,
+      commissionValue,
     } = req.body;
 
     if (!name || !sku || price === undefined || price === null) {
@@ -48,6 +51,20 @@ router.post("/", verifyToken, async (req, res) => {
     const existingSku = await Product.findOne({ organizationId, sku });
     if (existingSku) {
       return res.status(409).json({ error: "SKU already exists in this organization" });
+    }
+
+    // Prepare commission fields (only for services)
+    let finalCommissionType = "percentage";
+    let finalCommissionValue = 0;
+    if (type === "service") {
+      if (commissionType && !["percentage", "fixed"].includes(commissionType)) {
+        return res.status(400).json({ error: "commissionType must be 'percentage' or 'fixed'" });
+      }
+      if (commissionValue !== undefined && (typeof commissionValue !== "number" || commissionValue < 0)) {
+        return res.status(400).json({ error: "commissionValue must be a non-negative number" });
+      }
+      finalCommissionType = commissionType || "percentage";
+      finalCommissionValue = commissionValue !== undefined ? commissionValue : 0;
     }
 
     const product = new Product({
@@ -70,6 +87,9 @@ router.post("/", verifyToken, async (req, res) => {
       vendor,
       trackInventory: type === "service" ? false : trackInventory,
       createdBy: req.user.userId,
+      // NEW: commission fields
+      commissionType: finalCommissionType,
+      commissionValue: finalCommissionValue,
     });
 
     await product.save();
@@ -160,6 +180,9 @@ router.put("/:id", verifyToken, async (req, res) => {
       images,
       vendor,
       status,
+      // NEW: commission fields
+      commissionType,
+      commissionValue,
     } = req.body;
 
     const product = await Product.findOne({ _id: req.params.id, organizationId });
@@ -176,6 +199,7 @@ router.put("/:id", verifyToken, async (req, res) => {
       product.sku = sku;
     }
 
+    // Update basic fields
     if (name) product.name = name;
     if (description !== undefined) product.description = description;
     if (type) product.type = type;
@@ -194,6 +218,7 @@ router.put("/:id", verifyToken, async (req, res) => {
     if (vendor) product.vendor = vendor;
     if (status) product.status = status;
 
+    // Handle service-specific fields including commission
     if (product.type === "service") {
       product.trackInventory = false;
       if (!product.serviceKind) product.serviceKind = "single";
@@ -202,6 +227,24 @@ router.put("/:id", verifyToken, async (req, res) => {
           error: "serviceBundleComponents are required when saving a bundled service",
         });
       }
+
+      // Update commission fields if provided
+      if (commissionType !== undefined) {
+        if (!["percentage", "fixed"].includes(commissionType)) {
+          return res.status(400).json({ error: "commissionType must be 'percentage' or 'fixed'" });
+        }
+        product.commissionType = commissionType;
+      }
+      if (commissionValue !== undefined) {
+        if (typeof commissionValue !== "number" || commissionValue < 0) {
+          return res.status(400).json({ error: "commissionValue must be a non-negative number" });
+        }
+        product.commissionValue = commissionValue;
+      }
+    } else {
+      // For non-services, ensure commission fields are null or default? We'll ignore them.
+      // If they were provided, we could either ignore or set to default.
+      // We'll just ignore to avoid unintended changes.
     }
 
     await product.save();

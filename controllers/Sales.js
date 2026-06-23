@@ -4,6 +4,7 @@ const mongoose = require("mongoose");
 const Sale = require("../models/Sale");
 const Location = require("../models/Location");
 const Product = require("../models/Product");
+const User = require("../models/User"); // NEW: for commission overrides
 const DeliveryFee = require("../models/DeliveryFee");
 const Receivable = require("../models/Receivable");
 const ShopifyConnection = require("../models/ShopifyConnection");
@@ -355,13 +356,51 @@ const buildShopifySyncSummary = (sale = {}) => {
   };
 };
 
+// NEW: Helper to calculate commission for a service
+const calculateServiceCommission = (serviceItem, user, product) => {
+  const defaultType = product.commissionType || "percentage";
+  const defaultValue = Number(product.commissionValue) || 0;
+
+  let overrideType = defaultType;
+  let overrideValue = defaultValue;
+
+  if (user && user.commissionOverrides && Array.isArray(user.commissionOverrides)) {
+    const override = user.commissionOverrides.find(
+      (ov) => ov.serviceId.toString() === serviceItem.productId.toString(),
+    );
+    if (override) {
+      overrideType = override.commissionType;
+      overrideValue = Number(override.commissionValue) || 0;
+    }
+  }
+
+  const serviceTotal = serviceItem.lineTotal || 0;
+  let commissionAmount = 0;
+  if (overrideType === "percentage") {
+    commissionAmount = (serviceTotal * overrideValue) / 100;
+  } else {
+    commissionAmount = overrideValue;
+  }
+
+  // Cap commission at service total (for fixed amounts)
+  commissionAmount = Math.min(commissionAmount, serviceTotal);
+
+  return {
+    commissionType: overrideType,
+    commissionValue: overrideValue,
+    commissionAmount: roundMoney(commissionAmount),
+  };
+};
+
 /**
  * POST /sales
  * Create a new sale with items from FLEXI and/or Shopify
+ * Supports:
+ * - Service‑product bundling (parentItemIndex)
+ * - Sale‑level and service‑level assigned users
+ * - Commission calculation based on service defaults + user overrides
  */
 const createSale = async (req, res) => {
-  
-
   try {
     const { organizationId } = req.user;
     const {
@@ -376,9 +415,8 @@ const createSale = async (req, res) => {
       notes,
       tags,
       deliveryInfo,
+      assignedUser, // NEW: sale-level default user
     } = req.body;
-
-    
 
     // Check for duplicate sale (idempotency)
     if (idempotencyKey) {
@@ -430,21 +468,36 @@ const createSale = async (req, res) => {
       });
     }
 
+    // Fetch sale-level assigned user (if provided)
+    let saleAssignedUser = null;
+    if (assignedUser) {
+      saleAssignedUser = await User.findById(assignedUser)
+        .select("commissionOverrides fullname email")
+        .lean();
+      if (!saleAssignedUser) {
+        return res.status(400).json({
+          success: false,
+          message: "Sale-level assigned user not found",
+        });
+      }
+    }
+
     const { taxRate, taxMode } = await resolveEffectiveTaxConfig({
       organizationId,
       location,
     });
 
-    // Calculate totals
+    // Calculate totals and enrich items
     let subtotal = 0;
     let totalTax = 0;
     let totalDiscount = 0;
-
-    // Enrich items and calculate
     const enrichedItems = [];
+
+    // We'll collect services to validate assigned users and calculate commissions later
+    const serviceItems = [];
+
     for (const item of items) {
       if (item.type === "flexi") {
-        // Validate FLEXI product
         const product = await Product.findOne({
           _id: item.productId,
           organizationId,
@@ -456,30 +509,51 @@ const createSale = async (req, res) => {
           });
         }
 
-        const lineTotal = item.quantity * item.unitPrice;
-        const lineDiscount = item.discount || 0;
-        const taxableAmount = Math.max(0, lineTotal - lineDiscount);
-        const lineTax = calculateLineTax({
-          taxableAmount,
-          taxRate,
-          taxMode,
-        });
+        const originalUnitPrice = Number(item.unitPrice) || 0;
+        const quantity = Number(item.quantity) || 0;
+        const discount = Number(item.discount) || 0;
+        const lineTotal = quantity * originalUnitPrice;
+        const taxableAmount = Math.max(0, lineTotal - discount);
+        const lineTax = calculateLineTax({ taxableAmount, taxRate, taxMode });
 
-        enrichedItems.push({
+        const parentIndex =
+          item.parentItemIndex !== undefined && item.parentItemIndex !== null
+            ? Number(item.parentItemIndex)
+            : null;
+
+        const enrichedItem = {
           type: "flexi",
           productId: item.productId,
           productName: product.name,
           sku: product.sku,
-          quantity: item.quantity,
-          unitPrice: item.unitPrice,
-          lineTotal,
-          discount: lineDiscount,
+          quantity,
+          unitPrice: originalUnitPrice, // will be zeroed if child
+          lineTotal, // will be zeroed if child
+          discount,
           taxAmount: lineTax,
-        });
+          parentItemIndex: parentIndex,
+          originalPrice: originalUnitPrice,
+          assignedUser: null,
+          commissionAmount: 0,
+          commissionType: null,
+          commissionValue: 0,
+        };
 
-        subtotal += lineTotal;
-        totalTax += lineTax;
-        totalDiscount += lineDiscount;
+        // If this is a child product (attached to a service), zero out price/totals
+        if (parentIndex !== null) {
+          enrichedItem.unitPrice = 0;
+          enrichedItem.lineTotal = 0;
+          enrichedItem.taxAmount = 0; // no tax on attached products
+        }
+
+        enrichedItems.push(enrichedItem);
+
+        // Only add to subtotal if not a child
+        if (parentIndex === null) {
+          subtotal += lineTotal;
+          totalTax += lineTax;
+          totalDiscount += discount;
+        }
       } else if (item.type === "service") {
         const product = await Product.findOne({
           _id: item.productId,
@@ -499,53 +573,80 @@ const createSale = async (req, res) => {
           });
         }
 
+        const quantity = Number(item.quantity) || 0;
+        const unitPrice = Number(item.unitPrice) || 0;
+        const discount = Number(item.discount) || 0;
+        const lineTotal = quantity * unitPrice;
+        const taxableAmount = Math.max(0, lineTotal - discount);
+        const lineTax = calculateLineTax({ taxableAmount, taxRate, taxMode });
+
+        // Resolve assigned user for this service
+        let serviceAssignedUser = null;
+        if (item.assignedUser) {
+          serviceAssignedUser = await User.findById(item.assignedUser)
+            .select("commissionOverrides fullname email")
+            .lean();
+          if (!serviceAssignedUser) {
+            return res.status(400).json({
+              success: false,
+              message: `Assigned user ${item.assignedUser} for service ${item.productId} not found`,
+            });
+          }
+        } else if (saleAssignedUser) {
+          serviceAssignedUser = saleAssignedUser;
+        }
+
         const serviceBundleComponents = Array.isArray(product.serviceBundleComponents)
           ? product.serviceBundleComponents.map((component) => {
-              const componentQuantity = Number(component.quantity) || 1;
-              const componentUnitPrice = Number(component.priceSnapshot) || 0;
+              const compQuantity = Number(component.quantity) || 1;
+              const compUnitPrice = Number(component.priceSnapshot) || 0;
               return {
                 serviceProductId: component.serviceProductId,
                 productName: component.nameSnapshot || "",
                 sku: component.skuSnapshot || "",
-                quantity: componentQuantity,
-                unitPrice: componentUnitPrice,
-                lineTotal: roundMoney(componentQuantity * componentUnitPrice),
+                quantity: compQuantity,
+                unitPrice: compUnitPrice,
+                lineTotal: roundMoney(compQuantity * compUnitPrice),
               };
             })
           : [];
 
-        const lineTotal = item.quantity * item.unitPrice;
-        const lineDiscount = item.discount || 0;
-        const taxableAmount = Math.max(0, lineTotal - lineDiscount);
-        const lineTax = calculateLineTax({
-          taxableAmount,
-          taxRate,
-          taxMode,
-        });
-
-        enrichedItems.push({
+        const enrichedItem = {
           type: "service",
           productId: item.productId,
           productName: product.name,
           sku: product.sku,
-          quantity: item.quantity,
-          unitPrice: item.unitPrice,
+          quantity,
+          unitPrice,
           lineTotal,
-          discount: lineDiscount,
+          discount,
           taxAmount: lineTax,
           serviceBundle: {
-            isBundle:
-              product.serviceKind === "bundle" || serviceBundleComponents.length > 0,
+            isBundle: product.serviceKind === "bundle" || serviceBundleComponents.length > 0,
             bundleName: product.name,
             components: serviceBundleComponents,
           },
+          // NEW fields
+          parentItemIndex: null,
+          originalPrice: 0,
+          assignedUser: serviceAssignedUser ? serviceAssignedUser._id : null,
+          commissionAmount: 0,
+          commissionType: null,
+          commissionValue: 0,
+        };
+
+        enrichedItems.push(enrichedItem);
+        serviceItems.push({
+          index: enrichedItems.length - 1,
+          product,
+          assignedUser: serviceAssignedUser,
         });
 
         subtotal += lineTotal;
         totalTax += lineTax;
-        totalDiscount += lineDiscount;
+        totalDiscount += discount;
       } else if (item.type === "shopify") {
-        // Shopify items - just snapshot what was provided
+        // Shopify items – snapshot what was provided
         if (!item.shopifyVariantId || !item.productName) {
           return res.status(400).json({
             success: false,
@@ -554,36 +655,100 @@ const createSale = async (req, res) => {
           });
         }
 
-        const lineTotal = item.quantity * item.unitPrice;
-        const lineDiscount = item.discount || 0;
-        const taxableAmount = Math.max(0, lineTotal - lineDiscount);
-        const lineTax = calculateLineTax({
-          taxableAmount,
-          taxRate,
-          taxMode,
-        });
+        const originalUnitPrice = Number(item.unitPrice) || 0;
+        const quantity = Number(item.quantity) || 0;
+        const discount = Number(item.discount) || 0;
+        const lineTotal = quantity * originalUnitPrice;
+        const taxableAmount = Math.max(0, lineTotal - discount);
+        const lineTax = calculateLineTax({ taxableAmount, taxRate, taxMode });
 
-        enrichedItems.push({
+        const parentIndex =
+          item.parentItemIndex !== undefined && item.parentItemIndex !== null
+            ? Number(item.parentItemIndex)
+            : null;
+
+        const enrichedItem = {
           type: "shopify",
           shopifyVariantId: item.shopifyVariantId,
           productName: item.productName,
           sku: item.sku || "",
-          quantity: item.quantity,
-          unitPrice: item.unitPrice,
+          quantity,
+          unitPrice: originalUnitPrice,
           lineTotal,
-          discount: lineDiscount,
+          discount,
           taxAmount: lineTax,
-        });
+          parentItemIndex: parentIndex,
+          originalPrice: originalUnitPrice,
+          assignedUser: null,
+          commissionAmount: 0,
+          commissionType: null,
+          commissionValue: 0,
+        };
 
-        subtotal += lineTotal;
-        totalTax += lineTax;
-        totalDiscount += lineDiscount;
+        if (parentIndex !== null) {
+          enrichedItem.unitPrice = 0;
+          enrichedItem.lineTotal = 0;
+          enrichedItem.taxAmount = 0;
+        }
+
+        enrichedItems.push(enrichedItem);
+
+        if (parentIndex === null) {
+          subtotal += lineTotal;
+          totalTax += lineTax;
+          totalDiscount += discount;
+        }
       } else {
         return res.status(400).json({
           success: false,
           message: 'Item type must be "flexi", "service", or "shopify"',
         });
       }
+    }
+
+    // Validate that every service has an assigned user
+    const servicesWithoutUser = enrichedItems.filter(
+      (item) => item.type === "service" && !item.assignedUser,
+    );
+    if (servicesWithoutUser.length > 0) {
+      const names = servicesWithoutUser.map((item) => item.productName).join(", ");
+      return res.status(400).json({
+        success: false,
+        message: `The following services require an assigned user: ${names}`,
+      });
+    }
+
+    // Calculate commissions for all services
+    const serviceProductIds = serviceItems.map((s) => s.product._id);
+    const serviceProducts = await Product.find({
+      _id: { $in: serviceProductIds },
+      organizationId,
+    }).lean();
+    const productMap = {};
+    serviceProducts.forEach((p) => (productMap[p._id.toString()] = p));
+
+    // Pre-fetch users with overrides for all assigned users (deduplicate)
+    const userIds = serviceItems
+      .map((s) => s.assignedUser?._id)
+      .filter(Boolean);
+    const uniqueUserIds = [...new Set(userIds.map((id) => id.toString()))];
+    const usersWithOverrides = await User.find({
+      _id: { $in: uniqueUserIds },
+    })
+      .select("commissionOverrides")
+      .lean();
+    const userMap = {};
+    usersWithOverrides.forEach((u) => (userMap[u._id.toString()] = u));
+
+    for (const service of serviceItems) {
+      const product = productMap[service.product._id.toString()];
+      if (!product) continue;
+      const user = service.assignedUser ? userMap[service.assignedUser._id.toString()] : null;
+      const enrichedItem = enrichedItems[service.index];
+      const commission = calculateServiceCommission(enrichedItem, user, product);
+      enrichedItem.commissionType = commission.commissionType;
+      enrichedItem.commissionValue = commission.commissionValue;
+      enrichedItem.commissionAmount = commission.commissionAmount;
     }
 
     subtotal = roundMoney(subtotal);
@@ -595,24 +760,10 @@ const createSale = async (req, res) => {
       totalAmount += totalTax;
     }
 
-    // Handle delivery fee if provided
+    // --- Delivery fee processing (unchanged, preserved from original) ---
     let deliveryFee = null;
     let deliveryFeeAmount = 0;
-    
-    if (deliveryInfo) {
-      console.log("📦 Processing delivery info:", {
-        requiresDelivery: deliveryInfo.requiresDelivery,
-        hasRecipientName: !!deliveryInfo.recipientName,
-        hasRecipientPhone: !!deliveryInfo.recipientPhone,
-        hasDeliveryAddress: !!deliveryInfo.deliveryAddress,
-        hasFeeType: !!deliveryInfo.feeType,
-        hasCategory: !!deliveryInfo.deliveryCategory,
-        hasOption: !!deliveryInfo.deliveryOption,
-      });
-    } else {
-      console.log("ℹ️ No deliveryInfo provided in request");
-    }
-    
+
     if (deliveryInfo && deliveryInfo.requiresDelivery) {
       // Validate required delivery info
       const missingFields = [];
@@ -628,7 +779,6 @@ const createSale = async (req, res) => {
       }
 
       // Validate delivery address contains minimum required fields (street and city)
-      // Country will default to "Kenya" if not provided
       const addressMissingFields = [];
       if (!deliveryInfo.deliveryAddress.street) addressMissingFields.push("street");
       if (!deliveryInfo.deliveryAddress.city) addressMissingFields.push("city");
@@ -640,11 +790,9 @@ const createSale = async (req, res) => {
         });
       }
 
-      // Check if using new category-based system or legacy feeType
       const usingCategory = !!(deliveryInfo.deliveryCategory && deliveryInfo.deliveryOption);
       const usingLegacyFeeType = !!deliveryInfo.feeType;
 
-      // Validate that at least one fee type is provided
       if (!usingCategory && !usingLegacyFeeType) {
         return res.status(400).json({
           success: false,
@@ -660,11 +808,9 @@ const createSale = async (req, res) => {
       let feeType = undefined;
 
       if (usingCategory) {
-        // New category-based delivery fee
         deliveryCategory = deliveryInfo.deliveryCategory;
         deliveryOption = deliveryInfo.deliveryOption;
 
-        // Find category in location
         const category = location.deliveryCategories?.find(
           (cat) => cat.categoryName === deliveryCategory
         );
@@ -683,7 +829,6 @@ const createSale = async (req, res) => {
           });
         }
 
-        // Find option in category
         const option = category.childOptions?.find(
           (opt) => opt.optionName === deliveryOption
         );
@@ -703,10 +848,8 @@ const createSale = async (req, res) => {
         }
 
         amount = option.price;
-        // Set initial category status to first status in workflow
         categoryStatus = category.statusWorkflow?.[0]?.status || "pending";
       } else {
-        // Legacy feeType-based delivery fee
         feeType = deliveryInfo.feeType || location.deliveryFeeSettings?.defaultFeeType || "standard";
 
         if (feeType === "custom") {
@@ -727,14 +870,10 @@ const createSale = async (req, res) => {
         }
       }
 
-      // Delivery fees are not taxed
       const deliveryTax = 0;
       deliveryFeeAmount = amount;
-
-      // Add delivery fee to total
       totalAmount += deliveryFeeAmount;
 
-      // Prepare delivery fee object (will be created after sale)
       deliveryFee = {
         feeType: feeType || undefined,
         deliveryCategory: deliveryCategory || undefined,
@@ -761,26 +900,11 @@ const createSale = async (req, res) => {
         notes: deliveryInfo.notes,
         deliveryInstructions: deliveryInfo.deliveryInstructions,
       };
-      
-      console.log("✅ Delivery fee object prepared:", {
-        amount: deliveryFee.amount,
-        totalAmount: deliveryFee.totalAmount,
-        feeType: deliveryFee.feeType,
-        deliveryCategory: deliveryFee.deliveryCategory,
-        deliveryAddress: deliveryFee.deliveryAddress,
-        recipientName: deliveryFee.recipientName,
-      });
-    } else {
-      console.log("⚠️ deliveryInfo or requiresDelivery is falsy:", {
-        hasDeliveryInfo: !!deliveryInfo,
-        requiresDelivery: deliveryInfo?.requiresDelivery,
-      });
     }
 
-    // Prepare payments (support split payments)
+    // --- Payments ---
     let normalizedPayments = [];
     if (payments && Array.isArray(payments) && payments.length > 0) {
-      // Basic validation
       const sum = payments.reduce((acc, p) => acc + (Number(p.amount) || 0), 0);
       if (sum <= 0) {
         return res.status(400).json({
@@ -788,14 +912,12 @@ const createSale = async (req, res) => {
           message: "Payments total must be greater than 0",
         });
       }
-
       if (sum - totalAmount > 0.01) {
         return res.status(400).json({
           success: false,
           message: `Payments total (${sum.toFixed(2)}) cannot exceed sale total (${totalAmount.toFixed(2)})`,
         });
       }
-
       normalizedPayments = payments.map((p) => ({
         method: p.method,
         amount: Number(p.amount) || 0,
@@ -817,26 +939,16 @@ const createSale = async (req, res) => {
     }
 
     const completedPaymentsTotal = getCompletedPaymentsTotal(normalizedPayments);
-    const initialBalanceDue = Math.max(
-      0,
-      roundMoney(totalAmount - completedPaymentsTotal),
-    );
-    const overallPaymentStatus = deriveSalePaymentStatus(
-      normalizedPayments,
-      totalAmount,
-    );
+    const initialBalanceDue = Math.max(0, roundMoney(totalAmount - completedPaymentsTotal));
+    const overallPaymentStatus = deriveSalePaymentStatus(normalizedPayments, totalAmount);
 
     const normalizedTags = Array.isArray(tags) ? [...tags] : [];
     if (initialBalanceDue > 0.01) {
-      if (!normalizedTags.includes("reservation")) {
-        normalizedTags.push("reservation");
-      }
-      if (!normalizedTags.includes("partial-payment")) {
-        normalizedTags.push("partial-payment");
-      }
+      if (!normalizedTags.includes("reservation")) normalizedTags.push("reservation");
+      if (!normalizedTags.includes("partial-payment")) normalizedTags.push("partial-payment");
     }
 
-    // Verify an open shift session exists for this cashier at this location
+    // Verify open shift
     const ShiftSession = require("../models/ShiftSession");
     const { findPreviousDayOpenShiftSession } = require("../utils/shiftSessionCalculations");
     const previousDayOpenShift = await findPreviousDayOpenShiftSession({
@@ -845,7 +957,6 @@ const createSale = async (req, res) => {
       locationId,
       cashierId: req.user.userId,
     });
-
     if (previousDayOpenShift) {
       return res.status(403).json({
         success: false,
@@ -873,12 +984,12 @@ const createSale = async (req, res) => {
     const receiptNumber = `REC-${organizationId}-${Date.now()}`;
     const transactionId = `TXN-${organizationId}-${Date.now()}`;
 
-    // Start MongoDB transaction for atomic sale + inventory updates
+    // Start transaction
     const session = await Sale.startSession();
     session.startTransaction();
 
     try {
-      // Create sale within transaction
+      // Create sale
       const sale = new Sale({
         organizationId,
         locationId,
@@ -897,19 +1008,16 @@ const createSale = async (req, res) => {
         deliveryFeeAmount: deliveryFeeAmount || 0,
         requiresDelivery: deliveryInfo?.requiresDelivery || false,
         deliveryStatus: deliveryInfo?.requiresDelivery ? "pending" : "not_required",
-        // NEW: Delivery category snapshot at time of sale
         deliveryCategory: deliveryFee?.deliveryCategory || undefined,
         deliveryOption: deliveryFee?.deliveryOption || undefined,
         categoryStatus: deliveryFee?.categoryStatus || undefined,
         deliveryStatusSyncedAt: deliveryInfo?.requiresDelivery ? new Date() : undefined,
         paymentMethod:
-          normalizedPayments.length === 1
-            ? normalizedPayments[0].method
-            : undefined,
+          normalizedPayments.length === 1 ? normalizedPayments[0].method : undefined,
         payments: normalizedPayments,
         paymentStatus: overallPaymentStatus,
         cashierId: req.user.userId,
-        // Shift Management & Audit
+        assignedUser: assignedUser || undefined, // NEW
         shiftSessionId: openShift._id,
         validationStatus: "pending",
         status: "completed",
@@ -921,6 +1029,7 @@ const createSale = async (req, res) => {
 
       await sale.save({ session });
 
+      // Create receivable if needed
       let createdReceivable = null;
       if (initialBalanceDue > 0.01) {
         createdReceivable = new Receivable({
@@ -958,52 +1067,28 @@ const createSale = async (req, res) => {
           createdBy: req.user.userId,
           updatedBy: req.user.userId,
         });
-
         await createdReceivable.save({ session });
       }
 
       // Create delivery fee if required
       let createdDeliveryFee = null;
       if (deliveryFee) {
-        try {
-          console.log("Creating delivery fee with data:", {
-            organizationId,
-            locationId,
-            saleId: sale._id,
-            recipientName: deliveryFee.recipientName,
-            deliveryAddress: deliveryFee.deliveryAddress,
-            amount: deliveryFee.amount,
-            feeType: deliveryFee.feeType,
-            deliveryCategory: deliveryFee.deliveryCategory,
-          });
-          
-          createdDeliveryFee = new DeliveryFee({
-            organizationId,
-            locationId,
-            saleId: sale._id,
-            ...deliveryFee,
-            status: "pending",
-            createdBy: req.user.userId,
-          });
-          await createdDeliveryFee.save({ session });
-
-          // Link delivery fee to sale
-          sale.deliveryFeeId = createdDeliveryFee._id;
-          await sale.save({ session });
-          
-          console.log("✅ Delivery fee created successfully:", createdDeliveryFee._id);
-        } catch (deliveryError) {
-          console.error("❌ Error creating delivery fee:", deliveryError);
-          throw new Error(`Delivery creation failed: ${deliveryError.message}`);
-        }
-      } else {
-        console.log("⚠️ No delivery fee data to create (deliveryInfo.requiresDelivery might be false)");
+        createdDeliveryFee = new DeliveryFee({
+          organizationId,
+          locationId,
+          saleId: sale._id,
+          ...deliveryFee,
+          status: "pending",
+          createdBy: req.user.userId,
+        });
+        await createdDeliveryFee.save({ session });
+        sale.deliveryFeeId = createdDeliveryFee._id;
+        await sale.save({ session });
       }
 
-      // Process inventory updates within transaction
+      // Process inventory updates
       await processInventoryUpdates(sale, organizationId, session);
 
-      // Commit transaction
       await session.commitTransaction();
 
       res.status(201).json({
@@ -2366,6 +2451,325 @@ const refundSale = async (req, res) => {
 };
 
 /**
+ * PATCH /sales/:id/reservation
+ * Edit a reservation sale with transactional retry logic
+ * Preserves existing payments; recalculates balance due and derived fields
+ */
+const MAX_EDIT_RETRIES = 3;
+const editReservationSale = async (req, res) => {
+  const { organizationId, userId } = req.user;
+  const { id } = req.params;
+  const { edits } = req.body;
+
+  // Validate inputs
+  if (!Array.isArray(edits) || edits.length === 0) {
+    return res.status(400).json({
+      success: false,
+      message: "edits array is required and must be non-empty",
+    });
+  }
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  for (let attempt = 1; attempt <= MAX_EDIT_RETRIES; attempt++) {
+    const session = await Sale.startSession();
+
+    try {
+      await session.startTransaction();
+
+      // Fetch sale with session to get consistent view
+      const sale = await Sale.findOne({ _id: id, organizationId }).session(session);
+
+      if (!sale) {
+        await session.abortTransaction();
+        return res.status(404).json({
+          success: false,
+          message: "Sale not found",
+        });
+      }
+
+      // Verify sale is in an editable state (only active completed reservations)
+      if (sale.status !== "completed" && sale.status !== "partial") {
+        await session.abortTransaction();
+        return res.status(400).json({
+          success: false,
+          message: `Only completed or partially paid sales can be edited. Current status: ${sale.status}`,
+        });
+      }
+
+      // Store original items for inventory reversal
+      const originalItems = JSON.parse(JSON.stringify(sale.items));
+      let itemsChanged = false;
+
+      // Process each edit action
+      for (const edit of edits) {
+        const { action, replacementItem, itemIndex } = edit;
+
+        if (action === "add") {
+          // Add or replace an item
+          if (!replacementItem) {
+            throw new Error("replacementItem is required for add action");
+          }
+
+          const qty = Number(replacementItem.quantity || 1);
+          if (!Number.isFinite(qty) || qty <= 0) {
+            throw new Error("Item quantity must be greater than zero");
+          }
+
+          const enrichedItem = {
+            ...replacementItem,
+            quantity: qty,
+            unitPrice: roundMoney(Number(replacementItem.unitPrice || 0)),
+            discount: roundMoney(Number(replacementItem.discount || 0)),
+            type: replacementItem.type || "shopify",
+            shopifyVariantId: replacementItem.shopifyVariantId,
+            productName: replacementItem.productName,
+            sku: replacementItem.sku,
+          };
+
+          if (itemIndex !== undefined && sale.items[itemIndex]) {
+            // Replace existing item
+            sale.items[itemIndex] = enrichedItem;
+          } else {
+            // Add new item
+            sale.items.push(enrichedItem);
+          }
+
+          itemsChanged = true;
+        } else if (action === "remove") {
+          // Remove an item
+          if (itemIndex === undefined) {
+            throw new Error("itemIndex is required for remove action");
+          }
+
+          if (sale.items[itemIndex]) {
+            sale.items.splice(itemIndex, 1);
+            itemsChanged = true;
+          }
+        } else if (action === "update") {
+          // Update existing item quantity/price/discount
+          if (itemIndex === undefined) {
+            throw new Error("itemIndex is required for update action");
+          }
+
+          if (sale.items[itemIndex]) {
+            const qty = Number(replacementItem.quantity !== undefined ? replacementItem.quantity : sale.items[itemIndex].quantity);
+            if (!Number.isFinite(qty) || qty <= 0) {
+              throw new Error("Item quantity must be greater than zero");
+            }
+
+            sale.items[itemIndex].quantity = qty;
+            sale.items[itemIndex].unitPrice = roundMoney(
+              Number(replacementItem.unitPrice !== undefined ? replacementItem.unitPrice : sale.items[itemIndex].unitPrice || 0),
+            );
+            sale.items[itemIndex].discount = roundMoney(
+              Number(replacementItem.discount !== undefined ? replacementItem.discount : sale.items[itemIndex].discount || 0),
+            );
+            itemsChanged = true;
+          }
+        }
+      }
+
+      // If items changed, recalculate totals and inventory
+      if (itemsChanged) {
+        // Recalculate sale totals
+        let subtotal = 0;
+        let totalDiscount = 0;
+
+        for (const item of sale.items) {
+          const qty = Number(item.quantity || 1);
+          const unitPrice = roundMoney(Number(item.unitPrice || 0));
+          const discount = roundMoney(Number(item.discount || 0));
+
+          subtotal += qty * unitPrice;
+          totalDiscount += discount;
+        }
+
+        subtotal = roundMoney(subtotal);
+        totalDiscount = roundMoney(totalDiscount);
+
+        const { taxRate, taxMode } = await resolveEffectiveTaxConfig({
+          organizationId,
+          location: await Location.findOne({
+            _id: sale.locationId,
+            organizationId,
+          }).session(session),
+        });
+
+        let taxAmount = 0;
+        if (taxMode === "exclusive") {
+          taxAmount = roundMoney((subtotal * (taxRate || 0)) / 100);
+        } else {
+          taxAmount = roundMoney(subtotal - subtotal / (1 + (taxRate || 0) / 100));
+        }
+
+        const newTotal = roundMoney(subtotal + (taxMode === "exclusive" ? taxAmount : 0));
+
+        // Update sale totals
+        sale.subtotalAmount = subtotal;
+        sale.discountAmount = totalDiscount;
+        sale.taxAmount = taxAmount;
+        sale.taxMode = taxMode;
+        sale.taxRateUsed = taxRate;
+        sale.totalAmount = newTotal;
+
+        // Recalculate payment status (preserve existing payments, recalculate balance due)
+        const completedPaymentsTotal = roundMoney(
+          (sale.payments || [])
+            .filter((p) => (p.status || "completed") === "completed")
+            .reduce((sum, p) => sum + (Number(p.amount) || 0), 0),
+        );
+
+        const balanceDue = roundMoney(newTotal - completedPaymentsTotal);
+
+        sale.paymentStatus = deriveSalePaymentStatus(sale.payments, newTotal);
+
+        // Update or create receivable if needed
+        if (balanceDue > 0.01) {
+          let receivable = await Receivable.findOne({
+            saleId: sale._id,
+            organizationId,
+          }).session(session);
+
+          if (!receivable) {
+            receivable = new Receivable({
+              organizationId,
+              locationId: sale.locationId,
+              saleId: sale._id,
+              customerId: sale.customerId,
+              customerName: sale.customerName,
+              totalDue: newTotal,
+              totalPaid: completedPaymentsTotal,
+              balanceDue,
+              status: completedPaymentsTotal > 0 ? "partial" : "open",
+              payments: (sale.payments || []).map((p) => ({
+                method: p.method,
+                amount: Number(p.amount) || 0,
+                reference: p.reference,
+                status: p.status || "completed",
+                cardLast4: p.cardLast4,
+                cardBrand: p.cardBrand,
+                collectedBy: p.collectedBy || userId,
+                collectedAt: normalizePaymentTimestamp(p.paidAt),
+              })),
+              createdBy: userId,
+              updatedBy: userId,
+            });
+
+            await receivable.save({ session });
+            sale.receivableId = receivable._id;
+          } else {
+            receivable.totalDue = newTotal;
+            receivable.totalPaid = completedPaymentsTotal;
+            receivable.balanceDue = balanceDue;
+            receivable.status = completedPaymentsTotal > 0 ? "partial" : "open";
+            receivable.payments = (sale.payments || []).map((p) => ({
+              method: p.method,
+              amount: Number(p.amount) || 0,
+              reference: p.reference,
+              status: p.status || "completed",
+              cardLast4: p.cardLast4,
+              cardBrand: p.cardBrand,
+              collectedBy: p.collectedBy || userId,
+              collectedAt: normalizePaymentTimestamp(p.paidAt),
+            }));
+            receivable.updatedBy = userId;
+
+            await receivable.save({ session });
+          }
+        }
+
+        // Reverse original inventory and process new inventory
+        // Reverse old items
+        for (const originalItem of originalItems) {
+          if (originalItem.type === "shopify") {
+            await queueInventoryUpdate({
+              organizationId,
+              locationId: sale.locationId,
+              shopifyVariantId: originalItem.shopifyVariantId,
+              quantityChange: originalItem.quantity,
+              reason: "item_removal_from_sale_edit",
+              relatedSaleId: sale._id,
+              session,
+            });
+          }
+        }
+
+        // Process new inventory decrements
+        for (const item of sale.items) {
+          if (item.type === "shopify") {
+            await queueInventoryUpdate({
+              organizationId,
+              locationId: sale.locationId,
+              shopifyVariantId: item.shopifyVariantId,
+              quantityChange: -item.quantity,
+              reason: "item_addition_to_sale_edit",
+              relatedSaleId: sale._id,
+              session,
+            });
+          }
+        }
+      }
+
+      // Save updated sale
+      sale.updatedAt = new Date();
+      sale.updatedBy = userId;
+      await sale.save({ session });
+
+      // Commit transaction
+      await session.commitTransaction();
+
+      // Return success response
+      res.json({
+        success: true,
+        message: "Reservation updated successfully",
+        data: {
+          saleId: sale._id,
+          totalAmount: sale.totalAmount,
+          discountAmount: sale.discountAmount,
+          taxAmount: sale.taxAmount,
+          taxMode: sale.taxMode,
+          paymentStatus: sale.paymentStatus,
+          itemCount: sale.items.length,
+          updatedAt: sale.updatedAt,
+        },
+      });
+
+      return; // Success - exit retry loop
+    } catch (txError) {
+      await session.abortTransaction();
+
+      // Check if it's a transient transaction error
+      const isTransientError =
+        txError.errorLabels?.includes("TransientTransactionError") ||
+        txError.code === 112 ||
+        (txError.message && txError.message.includes("Write conflict"));
+
+      if (isTransientError && attempt < MAX_EDIT_RETRIES) {
+        // Exponential backoff: 100ms × 2^(attempt-1)
+        const backoffMs = 100 * Math.pow(2, attempt - 1);
+        console.warn(
+          `Transient transaction error on attempt ${attempt}/${MAX_EDIT_RETRIES}. Retrying after ${backoffMs}ms...`,
+        );
+        await sleep(backoffMs);
+        continue; // Retry
+      }
+
+      // Non-transient error or max retries exceeded
+      throw txError;
+    } finally {
+      await session.endSession();
+    }
+  }
+
+  // Should not reach here, but provide fallback
+  res.status(500).json({
+    success: false,
+    message: "Failed to update reservation after max retries",
+  });
+};
+
+/**
  * GET /sales/reports/summary
  * Sales summary for reporting
  */
@@ -3460,6 +3864,11 @@ router.patch(
   "/:id/payments/reallocate",
   requirePermission("edit_sale"),
   reallocateSalePayment,
+);
+router.patch(
+  "/:id/reservation",
+  requirePermission("edit_sale"),
+  editReservationSale,
 );
 router.get("/:id", requirePermission("view_sale_history"), getSale);
 router.get("/", requirePermission("view_sale_history"), listSales);

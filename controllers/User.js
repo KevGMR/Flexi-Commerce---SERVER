@@ -18,6 +18,7 @@ const { verifyToken, verifyRefreshTokenMiddleware, extractDeviceId, requireOrgan
 const { checkUserStatus } = require("../middleware/userStatusCheck");
 const { loginLimiter, registrationLimiter, refreshLimiter, passwordResetLimiter } = require("../middleware/rateLimiter");
 const { getEffectivePermissionsForMembership, getMembershipPermissionsForRole } = require("../utils/effectivePermissions");
+const { requirePermission } = require("../middleware/permissionCheck");
 
 const saltRounds = Number(process.env.SALT) || 10;
 
@@ -60,17 +61,15 @@ const generateUniqueSlug = async (name) => {
   let slug = name
     .toLowerCase()
     .trim()
-    .replace(/[^\w\s-]/g, '') // remove special chars
-    .replace(/[\s_-]+/g, '-') // replace spaces/underscores with hyphens
-    .replace(/^-+|-+$/g, ''); // trim hyphens from start/end
+    .replace(/[^\w\s-]/g, '')
+    .replace(/[\s_-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
 
-  // Reserved slugs
   const reserved = ['admin', 'api', 'auth', 'settings', 'dashboard', 'login', 'signup', 'register'];
   if (reserved.includes(slug)) {
     slug = `${slug}-org`;
   }
 
-  // Check uniqueness, append number if taken
   let uniqueSlug = slug;
   let counter = 1;
   while (await Organization.findOne({ slug: uniqueSlug })) {
@@ -97,41 +96,34 @@ router.post("/new", registrationLimiter, async (req, res) => {
       phone,
     } = req.body;
 
-    // Validation
     if (!fullname || !email || !password) {
       return res.status(400).json({
         error: "Fullname, email, and password are required",
       });
     }
 
-    // Email format validation
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) {
       return res.status(400).json({ error: "Invalid email format" });
     }
 
-    // Password strength validation
     if (password.length < 8) {
       return res.status(400).json({
         error: "Password must be at least 8 characters long",
       });
     }
 
-    // Check if user exists
     const existingUser = await User.findOne({ email: email.toLowerCase() });
     if (existingUser) {
       return res.status(409).json({ error: "User already exists" });
     }
 
-    // Hash password
     const hashedPassword = await bcrypt.hash(password, saltRounds);
 
-    // Generate email verification token
     const verificationToken = crypto.randomBytes(32).toString("hex");
     const verificationExpiry = new Date();
     verificationExpiry.setHours(verificationExpiry.getHours() + 24);
 
-    // Create user
     const user = new User({
       fullname,
       email: email.toLowerCase(),
@@ -149,7 +141,6 @@ router.post("/new", registrationLimiter, async (req, res) => {
     let organization;
     let userRole = "Employee";
 
-    // Case 1: User has invitation token (joining existing org)
     if (invitationToken) {
       const invitation = await Invitation.findOne({
         token: invitationToken,
@@ -161,7 +152,6 @@ router.post("/new", registrationLimiter, async (req, res) => {
         return res.status(400).json({ error: "Invalid or expired invitation token" });
       }
 
-      // Enforce that signup email matches the invitation email
       if (invitation.email !== email.toLowerCase()) {
         return res.status(400).json({
           error: "Invitation email mismatch. Please register with the invited email address.",
@@ -175,7 +165,6 @@ router.post("/new", registrationLimiter, async (req, res) => {
 
       userRole = invitation.role;
 
-      // Add user to organization with live role permissions
       const permissions = await getMembershipPermissionsForRole(userRole);
       await UserOrganization.create({
         userId: user._id,
@@ -185,18 +174,14 @@ router.post("/new", registrationLimiter, async (req, res) => {
         locations: invitation.locations || [],
       });
 
-      // Mark invitation as accepted
       invitation.status = "accepted";
       invitation.acceptedBy = user._id;
       invitation.acceptedAt = new Date();
       await invitation.save();
     }
-    // Case 2: Creating first organization (new account)
     else if (organizationName) {
-      // Auto-generate unique slug from organization name
       const organizationSlug = await generateUniqueSlug(organizationName);
 
-      // Create organization
       organization = new Organization({
         name: organizationName,
         slug: organizationSlug,
@@ -205,7 +190,6 @@ router.post("/new", registrationLimiter, async (req, res) => {
 
       await organization.save();
 
-      // Add user as Owner with live role permissions
       const ownerPermissions = await getMembershipPermissionsForRole("Owner");
       await UserOrganization.create({
         userId: user._id,
@@ -221,7 +205,6 @@ router.post("/new", registrationLimiter, async (req, res) => {
       });
     }
 
-    // Send verification email
     await sendEmailVerification(email, verificationToken, fullname);
 
     await logTokenEvent(
@@ -257,13 +240,10 @@ router.post("/new", registrationLimiter, async (req, res) => {
 /**
  * Login user - returns organizations or issues org-scoped token
  * POST /users/login
- * Body: { email, password, organizationId (optional) }
  */
 router.post("/login", loginLimiter, extractDeviceId, async (req, res) => {
   try {
     const { email, password, organizationId } = req.body;
-
-    console.log({email, password, organizationId})
 
     if (!email || !password) {
       return res.status(400).json({
@@ -271,7 +251,6 @@ router.post("/login", loginLimiter, extractDeviceId, async (req, res) => {
       });
     }
 
-    // Find user
     const user = await User.findOne({ email: email.toLowerCase() });
 
     if (!user) {
@@ -281,7 +260,6 @@ router.post("/login", loginLimiter, extractDeviceId, async (req, res) => {
       });
     }
 
-    // Check if email is verified
     if (!user.emailVerified) {
       return res.status(403).json({
         error: "Please verify your email before logging in",
@@ -289,7 +267,6 @@ router.post("/login", loginLimiter, extractDeviceId, async (req, res) => {
       });
     }
 
-    // Check if user is active
     if (user.status !== "active") {
       await logFailedAuth(email, req.ip, `Account status: ${user.status}`);
       return res.status(403).json({
@@ -298,7 +275,6 @@ router.post("/login", loginLimiter, extractDeviceId, async (req, res) => {
       });
     }
 
-    // Verify password
     const isPasswordValid = await bcrypt.compare(password, user.password);
 
     if (!isPasswordValid) {
@@ -308,7 +284,6 @@ router.post("/login", loginLimiter, extractDeviceId, async (req, res) => {
       });
     }
 
-    // Get user's organizations
     const memberships = await UserOrganization.find({
       userId: user._id,
       status: "active",
@@ -322,7 +297,6 @@ router.post("/login", loginLimiter, extractDeviceId, async (req, res) => {
       });
     }
 
-    // If organizationId provided, validate and issue tokens
     if (organizationId) {
       const membership = memberships.find(
         (m) => String(m.organizationId._id) === String(organizationId)
@@ -347,7 +321,6 @@ router.post("/login", loginLimiter, extractDeviceId, async (req, res) => {
 
       const orgPermissions = effectiveMembership?.permissions || membership.permissions;
 
-      // Generate org-scoped tokens
       const accessToken = generateAccessToken(
         user._id,
         membership.role,
@@ -365,11 +338,9 @@ router.post("/login", loginLimiter, extractDeviceId, async (req, res) => {
         req.deviceName
       );
 
-      // Update last login
       user.lastLogin = new Date();
       await user.save();
 
-      // Log successful login
       await logTokenEvent(
         user._id,
         organizationId,
@@ -383,7 +354,6 @@ router.post("/login", loginLimiter, extractDeviceId, async (req, res) => {
         }
       );
 
-      // Set httpOnly cookie for refresh token
       res.cookie("refreshToken", refreshToken, getRefreshCookieOptions());
 
       return res.status(200).json({
@@ -405,7 +375,6 @@ router.post("/login", loginLimiter, extractDeviceId, async (req, res) => {
       });
     }
 
-    // No organizationId provided - return user's organizations for selection
     return res.status(200).json({
       message: "Select an organization to continue",
       user: {
@@ -437,14 +406,12 @@ router.post("/refresh", refreshLimiter, extractDeviceId, verifyRefreshTokenMiddl
     const tokenDoc = req.refreshTokenDoc;
     const refreshToken = req.refreshToken;
 
-    // Get user
     const user = await User.findById(tokenDoc.userId);
 
     if (!user) {
       return res.status(401).json({ error: "User not found", code: "USER_NOT_FOUND" });
     }
 
-    // Check user status
     if (user.status !== "active") {
       return res.status(403).json({
         error: `Account is ${user.status}`,
@@ -452,12 +419,10 @@ router.post("/refresh", refreshLimiter, extractDeviceId, verifyRefreshTokenMiddl
       });
     }
 
-    // Check device ID matches
     if (tokenDoc.deviceId !== req.deviceId) {
       return res.status(401).json({ error: "Device ID mismatch", code: "DEVICE_ID_MISMATCH" });
     }
 
-    // Get user's organization membership for permissions
     const membership = await UserOrganization.findOne({
       userId: user._id,
       organizationId: tokenDoc.organizationId,
@@ -468,8 +433,6 @@ router.post("/refresh", refreshLimiter, extractDeviceId, verifyRefreshTokenMiddl
       return res.status(403).json({ error: "No access to organization", code: "ORG_ACCESS_REVOKED" });
     }
 
-
-    // Rotate token with latest permissions from organization
     const effectiveMembership = await getEffectivePermissionsForMembership({
       userId: user._id,
       organizationId: tokenDoc.organizationId,
@@ -488,7 +451,6 @@ router.post("/refresh", refreshLimiter, extractDeviceId, verifyRefreshTokenMiddl
       tokenDoc.organizationId
     );
 
-    // Log token rotation
     await logTokenEvent(
       user._id,
       tokenDoc.organizationId,
@@ -500,7 +462,6 @@ router.post("/refresh", refreshLimiter, extractDeviceId, verifyRefreshTokenMiddl
       }
     );
 
-    // Set new refresh token as httpOnly cookie
     res.cookie("refreshToken", newRefreshToken, getRefreshCookieOptions());
 
     res.status(200).json({
@@ -532,10 +493,8 @@ router.post("/logout", extractDeviceId, verifyToken, async (req, res) => {
     const refreshToken = req.cookies?.refreshToken;
 
     if (refreshToken) {
-      // Hash token
       const hashedToken = crypto.createHash("sha256").update(refreshToken).digest("hex");
 
-      // Revoke token
       await RefreshToken.findOneAndUpdate(
         { token: hashedToken, userId: req.user.userId, deviceId: req.deviceId },
         {
@@ -546,7 +505,6 @@ router.post("/logout", extractDeviceId, verifyToken, async (req, res) => {
       );
     }
 
-    // Clear cookie
     res.clearCookie("refreshToken", getRefreshCookieOptions({ includeMaxAge: false }));
 
     await logTokenEvent(
@@ -624,8 +582,6 @@ router.delete("/devices/:deviceId", verifyToken, async (req, res) => {
   }
 });
 
-
-
 /**
  * Request password reset
  * POST /users/reset
@@ -641,7 +597,6 @@ router.post("/reset", passwordResetLimiter, async (req, res) => {
     const user = await User.findOne({ email: email.toLowerCase() });
 
     if (!user) {
-      // Don't reveal if user exists
       return res.status(200).json({
         message: "If the email exists, a password reset link has been sent",
       });
@@ -653,16 +608,14 @@ router.post("/reset", passwordResetLimiter, async (req, res) => {
       });
     }
 
-    // Generate reset token
     const resetToken = crypto.randomBytes(32).toString("hex");
     const resetExpiry = new Date();
-    resetExpiry.setHours(resetExpiry.getHours() + 1); // 1 hour
+    resetExpiry.setHours(resetExpiry.getHours() + 1);
 
     user.passwordResetToken = resetToken;
     user.passwordResetExpiry = resetExpiry;
     await user.save();
 
-    // Send email
     await sendPasswordReset(email, resetToken, user.fullname);
 
     await logTokenEvent(user._id, null, "password_reset_requested", req.ip, req.get("user-agent"), {
@@ -708,7 +661,6 @@ router.post("/reset/:token", async (req, res) => {
       });
     }
 
-    // Hash new password
     const hashedPassword = await bcrypt.hash(password, saltRounds);
 
     user.password = hashedPassword;
@@ -717,7 +669,6 @@ router.post("/reset/:token", async (req, res) => {
     user.lastPasswordReset = new Date();
     await user.save();
 
-    // Revoke all tokens
     await revokeAllUserTokens(user._id, "password_reset");
 
     const { logPasswordReset } = require("../services/auditLogger");
@@ -774,10 +725,8 @@ router.post("/create-organization", verifyToken, async (req, res) => {
       });
     }
 
-    // Auto-generate unique slug from organization name
     const organizationSlug = await generateUniqueSlug(organizationName);
 
-    // Create organization
     const organization = new Organization({
       name: organizationName,
       slug: organizationSlug,
@@ -786,7 +735,6 @@ router.post("/create-organization", verifyToken, async (req, res) => {
 
     await organization.save();
 
-    // Add user as Owner with live role permissions
     const ownerPermissions = await getMembershipPermissionsForRole("Owner");
     await UserOrganization.create({
       userId: req.user.userId,
@@ -837,7 +785,6 @@ router.post("/switch-organization", verifyToken, extractDeviceId, async (req, re
       return res.status(401).json({ error: "User not found" });
     }
 
-    // Verify membership
     const membership = await UserOrganization.findOne({
       userId: req.user.userId,
       organizationId,
@@ -862,7 +809,6 @@ router.post("/switch-organization", verifyToken, extractDeviceId, async (req, re
 
     const orgPermissions = effectiveMembership?.permissions || membership.permissions;
 
-    // Generate new tokens for new organization
     const accessToken = generateAccessToken(
       user._id,
       membership.role,
@@ -880,10 +826,8 @@ router.post("/switch-organization", verifyToken, extractDeviceId, async (req, re
       req.deviceName
     );
 
-    // Set httpOnly cookie
     res.cookie("refreshToken", refreshToken, getRefreshCookieOptions());
 
-    // Log organization switch
     await logTokenEvent(
       user._id,
       organizationId,
@@ -914,14 +858,13 @@ router.post("/switch-organization", verifyToken, extractDeviceId, async (req, re
 });
 
 /**
- * Update user profile
+ * Update user profile (including commission overrides)
  * PUT /users/:userId
- * Self update allowed; editing others requires EDIT_USER
  */
 router.put("/:userId", verifyToken, async (req, res) => {
   try {
     const { userId } = req.params;
-    const { fullname, phone, avatarUrl } = req.body;
+    const { fullname, phone, avatarUrl, commissionOverrides } = req.body;
 
     const isSelf = req.user.userId?.toString() === userId;
 
@@ -929,12 +872,6 @@ router.put("/:userId", verifyToken, async (req, res) => {
       return res.status(403).json({
         error: "Access denied. Insufficient permissions.",
         requiredPermission: PERMISSIONS.EDIT_USER,
-      });
-    }
-
-    if (fullname === undefined && phone === undefined && avatarUrl === undefined) {
-      return res.status(400).json({
-        error: "At least one of fullname, phone, or avatarUrl is required",
       });
     }
 
@@ -947,6 +884,32 @@ router.put("/:userId", verifyToken, async (req, res) => {
     if (phone !== undefined) user.phone = phone;
     if (avatarUrl !== undefined) user.avatarUrl = avatarUrl;
 
+    if (commissionOverrides !== undefined) {
+      if (!Array.isArray(commissionOverrides)) {
+        return res.status(400).json({ error: "commissionOverrides must be an array" });
+      }
+      for (const override of commissionOverrides) {
+        if (!override.serviceId || !override.commissionType || override.commissionValue === undefined) {
+          return res.status(400).json({
+            error: "Each override must have serviceId, commissionType, and commissionValue"
+          });
+        }
+        if (!["percentage", "fixed"].includes(override.commissionType)) {
+          return res.status(400).json({ error: "commissionType must be 'percentage' or 'fixed'" });
+        }
+        if (typeof override.commissionValue !== 'number' || override.commissionValue < 0) {
+          return res.status(400).json({ error: "commissionValue must be a non-negative number" });
+        }
+      }
+      user.commissionOverrides = commissionOverrides.map(ov => ({
+        serviceId: ov.serviceId,
+        commissionType: ov.commissionType,
+        commissionValue: ov.commissionValue,
+        updatedBy: req.user.userId,
+        updatedAt: new Date(),
+      }));
+    }
+
     await user.save();
 
     return res.status(200).json({
@@ -957,11 +920,115 @@ router.put("/:userId", verifyToken, async (req, res) => {
         email: user.email,
         phone: user.phone,
         avatarUrl: user.avatarUrl,
+        commissionOverrides: user.commissionOverrides,
       },
     });
   } catch (error) {
     console.error("Update user error:", error);
     return res.status(500).json({ error: "Failed to update user" });
+  }
+});
+
+/**
+ * NEW: Get single user by ID
+ * GET /users/:userId
+ */
+router.get("/:userId", verifyToken, requirePermission(PERMISSIONS.VIEW_USERS), async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { organizationId } = req.user;
+
+    // Verify user belongs to the organization
+    const membership = await UserOrganization.findOne({
+      userId,
+      organizationId,
+      status: "active",
+    });
+
+    if (!membership) {
+      return res.status(404).json({ error: "User not found in this organization" });
+    }
+
+    const user = await User.findById(userId)
+      .select("_id fullname email phone avatarUrl status emailVerified lastLogin createdAt updatedAt commissionOverrides")
+      .lean();
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    return res.status(200).json({
+      success: true,
+      user,
+    });
+  } catch (error) {
+    console.error("Get user error:", error);
+    return res.status(500).json({ error: "Failed to fetch user" });
+  }
+});
+
+/**
+ * List users in the current organization
+ * GET /users
+ */
+router.get("/", verifyToken, requirePermission(PERMISSIONS.VIEW_USERS), async (req, res) => {
+  try {
+    const { organizationId } = req.user;
+    const { search, limit = 50, page = 1, status } = req.query;
+
+    const memberships = await UserOrganization.find({
+      organizationId,
+      status: "active",
+    })
+      .select("userId")
+      .lean();
+
+    const userIds = memberships.map((m) => m.userId);
+
+    if (userIds.length === 0) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          users: [],
+          pagination: { page: 1, limit: parseInt(limit), total: 0, pages: 0 },
+        },
+      });
+    }
+
+    const query = { _id: { $in: userIds } };
+    if (status) {
+      query.status = status;
+    }
+    if (search) {
+      query.$or = [
+        { fullname: { $regex: search, $options: "i" } },
+        { email: { $regex: search, $options: "i" } },
+      ];
+    }
+
+    const total = await User.countDocuments(query);
+    const users = await User.find(query)
+      .select("_id fullname email phone avatarUrl status emailVerified lastLogin createdAt updatedAt commissionOverrides")
+      .sort({ createdAt: -1 })
+      .skip((parseInt(page) - 1) * parseInt(limit))
+      .limit(parseInt(limit))
+      .lean();
+
+    res.status(200).json({
+      success: true,
+      data: {
+        users,
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total,
+          pages: Math.ceil(total / parseInt(limit)),
+        },
+      },
+    });
+  } catch (error) {
+    console.error("List users error:", error);
+    res.status(500).json({ error: "Failed to fetch users" });
   }
 });
 
