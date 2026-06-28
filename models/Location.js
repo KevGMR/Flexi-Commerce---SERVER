@@ -54,6 +54,11 @@ const locationSchema = new Schema(
       enum: ["active", "inactive"],
       default: "active",
     },
+    // NEW: Toggle for enabling product cost on services
+    enableProductCost: {
+      type: Boolean,
+      default: false,
+    },
     // Delivery fee settings (legacy - kept for backward compatibility)
     deliveryFeeSettings: {
       enableDeliveryFees: {

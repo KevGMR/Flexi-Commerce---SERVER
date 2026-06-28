@@ -400,6 +400,11 @@ const calculateServiceCommission = (serviceItem, user, product) => {
  * - Sale‑level and service‑level assigned users
  * - Commission calculation based on service defaults + user overrides
  */
+/**
+ * POST /sales
+ * Create a new sale with items from FLEXI and/or Shopify
+ * Supports labor/product cost, service attachment, and commission based on labor cost
+ */
 const createSale = async (req, res) => {
   try {
     const { organizationId } = req.user;
@@ -415,7 +420,7 @@ const createSale = async (req, res) => {
       notes,
       tags,
       deliveryInfo,
-      assignedUser, // NEW: sale-level default user
+      assignedUser,
     } = req.body;
 
     // Check for duplicate sale (idempotency)
@@ -527,8 +532,8 @@ const createSale = async (req, res) => {
           productName: product.name,
           sku: product.sku,
           quantity,
-          unitPrice: originalUnitPrice, // will be zeroed if child
-          lineTotal, // will be zeroed if child
+          unitPrice: originalUnitPrice,
+          lineTotal,
           discount,
           taxAmount: lineTax,
           parentItemIndex: parentIndex,
@@ -537,18 +542,18 @@ const createSale = async (req, res) => {
           commissionAmount: 0,
           commissionType: null,
           commissionValue: 0,
+          laborCost: 0,
+          productCost: 0,
         };
 
-        // If this is a child product (attached to a service), zero out price/totals
         if (parentIndex !== null) {
           enrichedItem.unitPrice = 0;
           enrichedItem.lineTotal = 0;
-          enrichedItem.taxAmount = 0; // no tax on attached products
+          enrichedItem.taxAmount = 0;
         }
 
         enrichedItems.push(enrichedItem);
 
-        // Only add to subtotal if not a child
         if (parentIndex === null) {
           subtotal += lineTotal;
           totalTax += lineTax;
@@ -579,6 +584,10 @@ const createSale = async (req, res) => {
         const lineTotal = quantity * unitPrice;
         const taxableAmount = Math.max(0, lineTotal - discount);
         const lineTax = calculateLineTax({ taxableAmount, taxRate, taxMode });
+
+        // Read labor and product cost from the request
+        const laborCost = Number(item.laborCost) || 0;
+        const productCost = Number(item.productCost) || 0;
 
         // Resolve assigned user for this service
         let serviceAssignedUser = null;
@@ -626,13 +635,14 @@ const createSale = async (req, res) => {
             bundleName: product.name,
             components: serviceBundleComponents,
           },
-          // NEW fields
           parentItemIndex: null,
           originalPrice: 0,
           assignedUser: serviceAssignedUser ? serviceAssignedUser._id : null,
           commissionAmount: 0,
           commissionType: null,
           commissionValue: 0,
+          laborCost,
+          productCost,
         };
 
         enrichedItems.push(enrichedItem);
@@ -640,13 +650,13 @@ const createSale = async (req, res) => {
           index: enrichedItems.length - 1,
           product,
           assignedUser: serviceAssignedUser,
+          laborCost,
         });
 
         subtotal += lineTotal;
         totalTax += lineTax;
         totalDiscount += discount;
       } else if (item.type === "shopify") {
-        // Shopify items – snapshot what was provided
         if (!item.shopifyVariantId || !item.productName) {
           return res.status(400).json({
             success: false,
@@ -683,6 +693,8 @@ const createSale = async (req, res) => {
           commissionAmount: 0,
           commissionType: null,
           commissionValue: 0,
+          laborCost: 0,
+          productCost: 0,
         };
 
         if (parentIndex !== null) {
@@ -718,7 +730,7 @@ const createSale = async (req, res) => {
       });
     }
 
-    // Calculate commissions for all services
+    // Calculate commissions for all services based on laborCost
     const serviceProductIds = serviceItems.map((s) => s.product._id);
     const serviceProducts = await Product.find({
       _id: { $in: serviceProductIds },
@@ -727,7 +739,7 @@ const createSale = async (req, res) => {
     const productMap = {};
     serviceProducts.forEach((p) => (productMap[p._id.toString()] = p));
 
-    // Pre-fetch users with overrides for all assigned users (deduplicate)
+    // Pre-fetch users with overrides
     const userIds = serviceItems
       .map((s) => s.assignedUser?._id)
       .filter(Boolean);
@@ -745,10 +757,33 @@ const createSale = async (req, res) => {
       if (!product) continue;
       const user = service.assignedUser ? userMap[service.assignedUser._id.toString()] : null;
       const enrichedItem = enrichedItems[service.index];
-      const commission = calculateServiceCommission(enrichedItem, user, product);
-      enrichedItem.commissionType = commission.commissionType;
-      enrichedItem.commissionValue = commission.commissionValue;
-      enrichedItem.commissionAmount = commission.commissionAmount;
+      const labor = service.laborCost || 0;
+      const defaultType = product.commissionType || "percentage";
+      const defaultValue = Number(product.commissionValue) || 0;
+
+      let overrideType = defaultType;
+      let overrideValue = defaultValue;
+      if (user && user.commissionOverrides) {
+        const override = user.commissionOverrides.find(
+          (ov) => ov.serviceId.toString() === product._id.toString()
+        );
+        if (override) {
+          overrideType = override.commissionType;
+          overrideValue = Number(override.commissionValue) || 0;
+        }
+      }
+
+      let commissionAmount = 0;
+      if (overrideType === "percentage") {
+        commissionAmount = (labor * overrideValue) / 100;
+      } else {
+        commissionAmount = Math.min(overrideValue, labor);
+      }
+      commissionAmount = roundMoney(commissionAmount);
+
+      enrichedItem.commissionType = overrideType;
+      enrichedItem.commissionValue = overrideValue;
+      enrichedItem.commissionAmount = commissionAmount;
     }
 
     subtotal = roundMoney(subtotal);
@@ -760,12 +795,11 @@ const createSale = async (req, res) => {
       totalAmount += totalTax;
     }
 
-    // --- Delivery fee processing (unchanged, preserved from original) ---
+    // --- Delivery fee processing ---
     let deliveryFee = null;
     let deliveryFeeAmount = 0;
 
     if (deliveryInfo && deliveryInfo.requiresDelivery) {
-      // Validate required delivery info
       const missingFields = [];
       if (!deliveryInfo.recipientName) missingFields.push("recipientName");
       if (!deliveryInfo.recipientPhone) missingFields.push("recipientPhone");
@@ -778,7 +812,6 @@ const createSale = async (req, res) => {
         });
       }
 
-      // Validate delivery address contains minimum required fields (street and city)
       const addressMissingFields = [];
       if (!deliveryInfo.deliveryAddress.street) addressMissingFields.push("street");
       if (!deliveryInfo.deliveryAddress.city) addressMissingFields.push("city");
@@ -1017,7 +1050,7 @@ const createSale = async (req, res) => {
         payments: normalizedPayments,
         paymentStatus: overallPaymentStatus,
         cashierId: req.user.userId,
-        assignedUser: assignedUser || undefined, // NEW
+        assignedUser: assignedUser || undefined,
         shiftSessionId: openShift._id,
         validationStatus: "pending",
         status: "completed",

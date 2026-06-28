@@ -1,11 +1,12 @@
 const express = require("express");
-const mongoose = require("mongoose");
 const router = express.Router();
-
 const Product = require("../models/Product");
 const Variant = require("../models/Variant");
-const { verifyToken, requireOrganization } = require("../middleware/auth");
+const { verifyToken } = require("../middleware/auth");
 const { logTokenEvent } = require("../services/auditLogger");
+
+// --- Helper to parse numbers ---
+const toNumber = (val) => (val !== undefined && val !== null ? Number(val) : undefined);
 
 /**
  * Create product
@@ -30,10 +31,13 @@ router.post("/", verifyToken, async (req, res) => {
       tags,
       images,
       vendor,
-      // NEW: commission fields for services
       commissionType,
       commissionValue,
+      laborCost,
+      productCost,
     } = req.body;
+
+    console.log("[Product POST] Received:", { laborCost, productCost, price });
 
     if (!name || !sku || price === undefined || price === null) {
       return res.status(400).json({ error: "name, sku, and price are required" });
@@ -47,24 +51,41 @@ router.post("/", verifyToken, async (req, res) => {
       }
     }
 
-    // Check SKU uniqueness per org
     const existingSku = await Product.findOne({ organizationId, sku });
     if (existingSku) {
-      return res.status(409).json({ error: "SKU already exists in this organization" });
+      return res.status(409).json({ error: "SKU already exists" });
     }
 
-    // Prepare commission fields (only for services)
-    let finalCommissionType = "percentage";
-    let finalCommissionValue = 0;
+    let finalPrice = Number(price) || 0;
+    let finalLabor = 0,
+      finalProduct = 0;
+    let finalCommissionType = "percentage",
+      finalCommissionValue = 0;
+
     if (type === "service") {
+      // Commission
       if (commissionType && !["percentage", "fixed"].includes(commissionType)) {
         return res.status(400).json({ error: "commissionType must be 'percentage' or 'fixed'" });
       }
       if (commissionValue !== undefined && (typeof commissionValue !== "number" || commissionValue < 0)) {
-        return res.status(400).json({ error: "commissionValue must be a non-negative number" });
+        return res.status(400).json({ error: "commissionValue must be non-negative" });
       }
       finalCommissionType = commissionType || "percentage";
       finalCommissionValue = commissionValue !== undefined ? commissionValue : 0;
+
+      // Labor & Product
+      const labor = toNumber(laborCost) ?? 0;
+      const product = toNumber(productCost) ?? 0;
+      if (labor < 0 || product < 0) {
+        return res.status(400).json({ error: "laborCost and productCost cannot be negative" });
+      }
+      if (labor + product !== finalPrice) {
+        return res.status(400).json({
+          error: `Price (${finalPrice}) must equal laborCost (${labor}) + productCost (${product})`,
+        });
+      }
+      finalLabor = labor;
+      finalProduct = product;
     }
 
     const product = new Product({
@@ -77,7 +98,7 @@ router.post("/", verifyToken, async (req, res) => {
       serviceBundleComponents: Array.isArray(serviceBundleComponents)
         ? serviceBundleComponents
         : [],
-      price,
+      price: finalPrice,
       compareAtPrice,
       cost,
       weight,
@@ -87,12 +108,19 @@ router.post("/", verifyToken, async (req, res) => {
       vendor,
       trackInventory: type === "service" ? false : trackInventory,
       createdBy: req.user.userId,
-      // NEW: commission fields
       commissionType: finalCommissionType,
       commissionValue: finalCommissionValue,
+      laborCost: finalLabor,
+      productCost: finalProduct,
     });
 
     await product.save();
+    console.log("[Product POST] Saved product:", {
+      id: product._id,
+      laborCost: product.laborCost,
+      productCost: product.productCost,
+      price: product.price,
+    });
 
     await logTokenEvent(req.user.userId, organizationId, "product_created", req.ip, req.get("user-agent"), {
       details: `Product created: ${product.name}`,
@@ -146,7 +174,6 @@ router.get("/:id", verifyToken, async (req, res) => {
       return res.status(404).json({ error: "Product not found" });
     }
 
-    // Get variants
     const variants = await Variant.find({ productId: product._id });
 
     return res.status(200).json({ product, variants });
@@ -180,17 +207,20 @@ router.put("/:id", verifyToken, async (req, res) => {
       images,
       vendor,
       status,
-      // NEW: commission fields
       commissionType,
       commissionValue,
+      laborCost,
+      productCost,
     } = req.body;
+
+    console.log("[Product PUT] Received:", { laborCost, productCost, price });
 
     const product = await Product.findOne({ _id: req.params.id, organizationId });
     if (!product) {
       return res.status(404).json({ error: "Product not found" });
     }
 
-    // Check SKU uniqueness if changed
+    // SKU uniqueness if changed
     if (sku && sku !== product.sku) {
       const existingSku = await Product.findOne({ organizationId, sku });
       if (existingSku) {
@@ -199,15 +229,13 @@ router.put("/:id", verifyToken, async (req, res) => {
       product.sku = sku;
     }
 
-    // Update basic fields
+    // Basic fields
     if (name) product.name = name;
     if (description !== undefined) product.description = description;
     if (type) product.type = type;
     if (serviceKind) product.serviceKind = serviceKind;
     if (serviceBundleComponents !== undefined) product.serviceBundleComponents = Array.isArray(serviceBundleComponents) ? serviceBundleComponents : [];
-    if (trackInventory !== undefined) {
-      product.trackInventory = trackInventory;
-    }
+    if (trackInventory !== undefined) product.trackInventory = trackInventory;
     if (price !== undefined) product.price = price;
     if (compareAtPrice !== undefined) product.compareAtPrice = compareAtPrice;
     if (cost !== undefined) product.cost = cost;
@@ -218,7 +246,7 @@ router.put("/:id", verifyToken, async (req, res) => {
     if (vendor) product.vendor = vendor;
     if (status) product.status = status;
 
-    // Handle service-specific fields including commission
+    // Service-specific fields
     if (product.type === "service") {
       product.trackInventory = false;
       if (!product.serviceKind) product.serviceKind = "single";
@@ -228,7 +256,7 @@ router.put("/:id", verifyToken, async (req, res) => {
         });
       }
 
-      // Update commission fields if provided
+      // Commission
       if (commissionType !== undefined) {
         if (!["percentage", "fixed"].includes(commissionType)) {
           return res.status(400).json({ error: "commissionType must be 'percentage' or 'fixed'" });
@@ -237,14 +265,45 @@ router.put("/:id", verifyToken, async (req, res) => {
       }
       if (commissionValue !== undefined) {
         if (typeof commissionValue !== "number" || commissionValue < 0) {
-          return res.status(400).json({ error: "commissionValue must be a non-negative number" });
+          return res.status(400).json({ error: "commissionValue must be non-negative" });
         }
         product.commissionValue = commissionValue;
       }
+
+      // Labor & Product – use toNumber helper to handle undefined/0
+      const currentLabor = product.laborCost || 0;
+      const currentProduct = product.productCost || 0;
+      const newLabor = toNumber(laborCost);
+      const newProduct = toNumber(productCost);
+
+      // If not provided, keep existing
+      const finalLabor = newLabor !== undefined ? newLabor : currentLabor;
+      const finalProduct = newProduct !== undefined ? newProduct : currentProduct;
+
+      if (finalLabor < 0 || finalProduct < 0) {
+        return res.status(400).json({ error: "laborCost and productCost cannot be negative" });
+      }
+
+      // If price is also provided, validate sum
+      let finalPrice = price !== undefined ? Number(price) : product.price;
+      if (finalLabor + finalProduct !== finalPrice) {
+        return res.status(400).json({
+          error: `Price (${finalPrice}) must equal laborCost (${finalLabor}) + productCost (${finalProduct})`,
+        });
+      }
+
+      product.laborCost = finalLabor;
+      product.productCost = finalProduct;
+
+      console.log("[Product PUT] Updated service costs:", {
+        laborCost: product.laborCost,
+        productCost: product.productCost,
+        price: product.price,
+      });
     } else {
-      // For non-services, ensure commission fields are null or default? We'll ignore them.
-      // If they were provided, we could either ignore or set to default.
-      // We'll just ignore to avoid unintended changes.
+      // Non-services: reset cost fields
+      product.laborCost = 0;
+      product.productCost = 0;
     }
 
     await product.save();
@@ -267,8 +326,6 @@ router.put("/:id", verifyToken, async (req, res) => {
 router.delete("/:id", verifyToken, async (req, res) => {
   try {
     const organizationId = req.user.organizationId;
-
-    // Check if product has variants
     const variantCount = await Variant.countDocuments({ productId: req.params.id });
     if (variantCount > 0) {
       return res.status(400).json({ error: "Cannot delete product with variants. Delete variants first." });

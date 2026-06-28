@@ -61,7 +61,9 @@ const tokenAuditLogSchema = new Schema(
         "delivery_category_updated",
         "delivery_category_created",
         "delivery_option_updated",
-        "delivery_option_created"
+        "delivery_option_created",
+        "product_updated",
+        "product_created",
       ],
     },
     permission: {
