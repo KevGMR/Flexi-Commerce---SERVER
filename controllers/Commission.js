@@ -28,12 +28,16 @@ router.get("/", requirePermission("view_reports"), async (req, res) => {
       });
     }
 
-    const start = new Date(startDate);
-    const end = new Date(endDate);
+    // Parse dates as local (not UTC)
+    const [sYear, sMonth, sDay] = startDate.split('-').map(Number);
+    const [eYear, eMonth, eDay] = endDate.split('-').map(Number);
+    const start = new Date(sYear, sMonth - 1, sDay, 0, 0, 0, 0);
+    const end = new Date(eYear, eMonth - 1, eDay, 23, 59, 59, 999);
+
     if (isNaN(start.getTime()) || isNaN(end.getTime())) {
       return res.status(400).json({
         success: false,
-        message: "Invalid date format. Use ISO strings.",
+        message: "Invalid date format. Use YYYY-MM-DD.",
       });
     }
 
@@ -55,7 +59,6 @@ router.get("/", requirePermission("view_reports"), async (req, res) => {
           "items.commissionAmount": { $gt: 0 },
         },
       },
-      // Ensure assignedUser exists (should be validated at sale creation)
       {
         $match: {
           "items.assignedUser": { $ne: null },
@@ -72,7 +75,6 @@ router.get("/", requirePermission("view_reports"), async (req, res) => {
     let groupStage, projectStage, sortStage, paginationStage = [];
 
     if (userId) {
-      // Breakdown by sale for a specific user
       groupStage = {
         $group: {
           _id: {
@@ -111,7 +113,6 @@ router.get("/", requirePermission("view_reports"), async (req, res) => {
         { $limit: parseInt(limit) },
       ];
     } else {
-      // Summary by user
       groupStage = {
         $group: {
           _id: "$items.assignedUser",
