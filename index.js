@@ -15,6 +15,7 @@ const organizationRouter = require("./controllers/Organization");
 const rolePermissionRouter = require("./controllers/RolePermission");
 const auditLogRouter = require("./controllers/AuditLog");
 const commissionRouter = require("./controllers/Commission");
+const customerRouter = require("./controllers/Customer");
 
 // E-commerce Controllers (Week 3)
 const productRouter = require("./controllers/Product");
@@ -156,6 +157,8 @@ app.use("/transactions", verifyToken, checkUserStatus, transactionValidationRout
 
 // Commission Routes (Protected)
 app.use("/commissions", verifyToken, checkUserStatus, commissionRouter);
+
+app.use("/customers", verifyToken, checkUserStatus, customerRouter);
 
 // 404 Handler
 app.use((req, res) => {

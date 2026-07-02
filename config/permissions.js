@@ -2,6 +2,7 @@
 // Defines all available permissions, role mappings, and critical permission classifications
 
 const PERMISSIONS = {
+  VIEW_USERS: "view_users",
   // Sales Permissions
   CREATE_SALE: "create_sale",
   VIEW_SALE_HISTORY: "view_sale_history",
@@ -83,10 +84,13 @@ const PERMISSIONS = {
   DELIVERY_FEES_DELETE: "delivery_fees.delete",
   DELIVERY_FEES_ASSIGN_DRIVER: "delivery_fees.assign_driver",
   DELIVERY_FEES_UPDATE_STATUS: "delivery_fees.update_status",
+
+  // NEW: Customer Permissions
+  VIEW_CUSTOMERS: "view_customers",
+  CREATE_CUSTOMERS: "create_customers",
 };
 
 // Critical permissions that require immediate database check
-// These permissions are security-sensitive and bypass JWT cache
 const CRITICAL_PERMISSIONS = [
   PERMISSIONS.MANAGE_USERS,
   PERMISSIONS.DELETE_USER,
@@ -170,6 +174,10 @@ const ROLE_PERMISSIONS = {
     
     // Settings
     PERMISSIONS.VIEW_SETTINGS,
+
+    // NEW: Customers
+    PERMISSIONS.VIEW_CUSTOMERS,
+    PERMISSIONS.CREATE_CUSTOMERS,
   ],
   
   Cashier: [
@@ -265,6 +273,10 @@ const PERMISSION_GROUPS = {
     PERMISSIONS.DELIVERY_FEES_DELETE,
     PERMISSIONS.DELIVERY_FEES_ASSIGN_DRIVER,
     PERMISSIONS.DELIVERY_FEES_UPDATE_STATUS,
+  ],
+  customers: [
+    PERMISSIONS.VIEW_CUSTOMERS,
+    PERMISSIONS.CREATE_CUSTOMERS,
   ],
 };
 
