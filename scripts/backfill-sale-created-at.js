@@ -2,6 +2,10 @@ require("dotenv").config();
 const mongoose = require("mongoose");
 
 const Sale = require("../models/Sale");
+const ShiftSession = require("../models/ShiftSession");
+const Receivable = require("../models/Receivable");
+const ZReport = require("../models/ZReport");
+const User = require("../models/User");
 
 const hasFlag = (flag) => process.argv.includes(flag);
 
@@ -83,7 +87,6 @@ const parseFlexibleDateArgToUtc = (value, name) => {
     return customParsed;
   }
 
-  // Keep ISO compatibility to avoid breaking existing script callers.
   const isoParsed = new Date(value);
   if (!Number.isNaN(isoParsed.getTime())) {
     return {
@@ -163,14 +166,143 @@ const assertTimePreserved = (before, after) => {
 const logUsage = () => {
   console.log("\nUsage:");
   console.log(
-    "node scripts/backfill-sale-created-at.js --organizationId <ObjectId> --startDateTime <dd/mm/yyyy/hh:mm|ISO> --endDateTime <dd/mm/yyyy/hh:mm|ISO> --targetDate <dd/mm/yyyy/hh:mm|ISO> [--locationId <ObjectId>] [--sampleSize <number>] [--apply] [--dry-run]",
+    "node scripts/backfill-sale-created-at.js --organizationId <ObjectId> --startDateTime <dd/mm/yyyy/hh:mm|ISO> --endDateTime <dd/mm/yyyy/hh:mm|ISO> --targetDate <dd/mm/yyyy/hh:mm|ISO> [--locationId <ObjectId>] [--modifiedBy <UserId>] [--sampleSize <number>] [--apply] [--dry-run]",
   );
   console.log("\nNotes:");
   console.log("- Dry-run is the default mode.");
   console.log("- Accepted date input format: dd/mm/yyyy/hh:mm (converted to UTC).");
   console.log("- Date interpretation and transform are performed in UTC.");
   console.log("- Time-of-day is preserved from each original createdAt timestamp.");
+  console.log("- --modifiedBy is required when --apply is used (for audit trail)");
 };
+
+// NEW: Find or create the correct shift session for the backdated sale
+async function findOrCreateShiftSessionForSale(sale, newCreatedAt, modifiedBy) {
+  const startOfDay = new Date(Date.UTC(
+    newCreatedAt.getUTCFullYear(),
+    newCreatedAt.getUTCMonth(),
+    newCreatedAt.getUTCDate(),
+    0, 0, 0, 0
+  ));
+  
+  const endOfDay = new Date(Date.UTC(
+    newCreatedAt.getUTCFullYear(),
+    newCreatedAt.getUTCMonth(),
+    newCreatedAt.getUTCDate(),
+    23, 59, 59, 999
+  ));
+
+  // Find existing shift session for this cashier on the target day
+  let shiftSession = await ShiftSession.findOne({
+    organizationId: sale.organizationId,
+    locationId: sale.locationId,
+    cashierId: sale.cashierId,
+    status: "open",
+    openedAt: {
+      $gte: startOfDay,
+      $lte: endOfDay
+    }
+  });
+
+  // If no open shift, find the most recent closed shift on that day
+  if (!shiftSession) {
+    shiftSession = await ShiftSession.findOne({
+      organizationId: sale.organizationId,
+      locationId: sale.locationId,
+      cashierId: sale.cashierId,
+      status: "closed",
+      openedAt: {
+        $gte: startOfDay,
+        $lte: endOfDay
+      }
+    }).sort({ openedAt: -1 });
+
+    // If still no shift, create a new one
+    if (!shiftSession) {
+      const shiftCode = `SHIFT-${sale.organizationId}-${sale.locationId}-${newCreatedAt.getUTCFullYear()}${pad2(newCreatedAt.getUTCMonth() + 1)}${pad2(newCreatedAt.getUTCDate())}-${Date.now()}`;
+      
+      shiftSession = new ShiftSession({
+        organizationId: sale.organizationId,
+        locationId: sale.locationId,
+        cashierId: sale.cashierId,
+        shiftCode: shiftCode,
+        status: "open",
+        openedAt: newCreatedAt,
+        openedBy: modifiedBy,
+        openingCash: 0,
+        notes: `Auto-created for backdated sale ${sale._id}`
+      });
+
+      if (!hasFlag("--dry-run")) {
+        await shiftSession.save();
+      }
+    }
+  }
+
+  return shiftSession;
+}
+
+// NEW: Update receivable records
+async function updateReceivableRecords(saleId, newCreatedAt, modifiedBy) {
+  const receivable = await Receivable.findOne({ saleId });
+  if (!receivable) {
+    return null;
+  }
+
+  const updates = {
+    $set: {
+      createdAt: newCreatedAt,
+      updatedAt: new Date(),
+      updatedBy: modifiedBy,
+      "payments.$[].collectedAt": newCreatedAt // Update all payment timestamps
+    }
+  };
+
+  // Update lastPaymentAt if there are payments
+  if (receivable.payments && receivable.payments.length > 0) {
+    updates.$set.lastPaymentAt = newCreatedAt;
+  }
+
+  return updates;
+}
+
+// NEW: Update Z-Report for the shift
+async function updateZReportsForShift(shiftSessionId, newCreatedAt, modifiedBy) {
+  const zReport = await ZReport.findOne({ shiftSessionId });
+  if (!zReport) {
+    return null;
+  }
+
+  // We need to recalculate the shift summary
+  // Get all sales for this shift
+  const sales = await Sale.find({
+    shiftSessionId: shiftSessionId,
+    status: { $ne: "voided" }
+  });
+
+  const expectedCashSales = sales.reduce((total, sale) => {
+    // Sum cash payments only
+    if (sale.payments && sale.payments.length > 0) {
+      const cashPayments = sale.payments
+        .filter(p => p.method === "cash" && p.status === "completed")
+        .reduce((sum, p) => sum + p.amount, 0);
+      return total + cashPayments;
+    }
+    // Legacy single payment
+    if (sale.paymentMethod === "cash") {
+      return total + sale.totalAmount;
+    }
+    return total;
+  }, 0);
+
+  return {
+    $set: {
+      reportDate: newCreatedAt,
+      "summary.expectedCashSales": expectedCashSales,
+      updatedAt: new Date()
+    }
+  };
+}
 
 async function main() {
   const apply = hasFlag("--apply");
@@ -186,6 +318,7 @@ async function main() {
   const endDateTimeRaw = getArgValue("--endDateTime");
   const targetDateRaw = getArgValue("--targetDate");
   const sampleSizeRaw = getArgValue("--sampleSize");
+  const modifiedByRaw = getArgValue("--modifiedBy");
 
   if (!organizationIdRaw || !startDateTimeRaw || !endDateTimeRaw || !targetDateRaw) {
     logUsage();
@@ -194,8 +327,13 @@ async function main() {
     );
   }
 
+  if (apply && !modifiedByRaw) {
+    throw new Error("--modifiedBy is required when using --apply (for audit trail)");
+  }
+
   const organizationId = parseObjectId(organizationIdRaw, "--organizationId");
   const locationId = parseObjectId(locationIdRaw, "--locationId");
+  const modifiedBy = modifiedByRaw ? parseObjectId(modifiedByRaw, "--modifiedBy") : null;
   const startDateParsed = parseFlexibleDateArgToUtc(startDateTimeRaw, "--startDateTime");
   const endDateParsed = parseFlexibleDateArgToUtc(endDateTimeRaw, "--endDateTime");
   const targetDateParsed = parseFlexibleDateArgToUtc(targetDateRaw, "--targetDate");
@@ -233,6 +371,11 @@ async function main() {
     salesWouldUpdate: 0,
     salesUpdated: 0,
     salesUnchanged: 0,
+    shiftsFound: 0,
+    shiftsCreated: 0,
+    shiftUpdated: 0,
+    receivablesUpdated: 0,
+    zReportsUpdated: 0,
     timePreservationFailures: 0,
     errors: 0,
   };
@@ -241,8 +384,12 @@ async function main() {
   let bulkOps = [];
   const bulkChunkSize = 500;
 
+  // Track which shifts we've updated
+  const updatedShifts = new Set();
+  const updatedZReports = new Set();
+
   const cursor = Sale.find(query)
-    .select("_id createdAt")
+    .select("_id createdAt cashierId locationId organizationId shiftSessionId payments paymentMethod totalAmount status")
     .sort({ createdAt: 1 })
     .lean()
     .cursor();
@@ -276,23 +423,87 @@ async function main() {
 
     stats.salesWouldUpdate += 1;
 
+    // Find or create the correct shift session for the new date
+    let newShiftSession = null;
+    let shiftCreated = false;
+
+    if (!dryRun && apply) {
+      newShiftSession = await findOrCreateShiftSessionForSale(sale, shiftedCreatedAt, modifiedBy);
+      
+      if (newShiftSession) {
+        const isNew = newShiftSession.isNew || newShiftSession.createdAt === newShiftSession.updatedAt;
+        if (isNew) {
+          stats.shiftsCreated += 1;
+          shiftCreated = true;
+        } else {
+          stats.shiftsFound += 1;
+        }
+        
+        // Track shift for later update
+        if (!updatedShifts.has(String(newShiftSession._id))) {
+          updatedShifts.add(String(newShiftSession._id));
+        }
+      }
+    }
+
     if (sampleRows.length < sampleSize) {
       sampleRows.push({
         saleId: String(sale._id),
         beforeCreatedAtUtc: formatUtc(originalCreatedAt),
         afterCreatedAtUtc: formatUtc(shiftedCreatedAt),
+        beforeShiftId: sale.shiftSessionId ? String(sale.shiftSessionId) : "none",
+        afterShiftId: newShiftSession ? String(newShiftSession._id) : "unchanged",
         beforeCreatedAtString: originalCreatedAt.toString(),
         afterCreatedAtString: shiftedCreatedAt.toString(),
       });
     }
 
-    if (!dryRun) {
+    if (!dryRun && apply) {
+      // Prepare sale update with all date fields
+      const saleUpdate = {
+        $set: {
+          createdAt: shiftedCreatedAt,
+          completedAt: shiftedCreatedAt,
+          updatedAt: new Date(),
+          lastModified: new Date(),
+          modifiedBy: modifiedBy,
+        }
+      };
+
+      // Update payment timestamps
+      if (sale.payments && sale.payments.length > 0) {
+        // We need to update each payment's paidAt
+        saleUpdate.$set["payments.$[].paidAt"] = shiftedCreatedAt;
+      }
+
+      // If shift session changed, update it
+      if (newShiftSession && String(sale.shiftSessionId) !== String(newShiftSession._id)) {
+        saleUpdate.$set.shiftSessionId = newShiftSession._id;
+      }
+
+      // Add backdating flag for audit
+      saleUpdate.$set.backdated = true;
+      saleUpdate.$set.backdatedAt = new Date();
+      saleUpdate.$set.backdatedBy = modifiedBy;
+
       bulkOps.push({
         updateOne: {
           filter: { _id: sale._id },
-          update: { $set: { createdAt: shiftedCreatedAt } },
+          update: saleUpdate,
         },
       });
+
+      // Update receivable if exists
+      const receivableUpdate = await updateReceivableRecords(sale._id, shiftedCreatedAt, modifiedBy);
+      if (receivableUpdate) {
+        stats.receivablesUpdated += 1;
+        bulkOps.push({
+          updateOne: {
+            filter: { saleId: sale._id },
+            update: receivableUpdate,
+          },
+        });
+      }
 
       if (bulkOps.length >= bulkChunkSize) {
         const writeResult = await Sale.collection.bulkWrite(bulkOps, {
@@ -304,16 +515,81 @@ async function main() {
     }
   }
 
-  if (!dryRun && bulkOps.length > 0) {
+  // Execute remaining bulk operations
+  if (!dryRun && apply && bulkOps.length > 0) {
     const writeResult = await Sale.collection.bulkWrite(bulkOps, {
       ordered: false,
     });
     stats.salesUpdated += writeResult.modifiedCount || 0;
   }
 
+  // Now update shift sessions and Z-Reports
+  if (!dryRun && apply) {
+    console.log("\n--- Updating Shift Sessions and Z-Reports ---");
+    
+    for (const shiftId of updatedShifts) {
+      try {
+        const shift = await ShiftSession.findById(shiftId);
+        if (!shift) continue;
+
+        // Recalculate shift totals based on all sales in this shift
+        const shiftSales = await Sale.find({
+          shiftSessionId: shiftId,
+          status: { $ne: "voided" }
+        });
+
+        const expectedCashSales = shiftSales.reduce((total, sale) => {
+          if (sale.payments && sale.payments.length > 0) {
+            const cashPayments = sale.payments
+              .filter(p => p.method === "cash" && p.status === "completed")
+              .reduce((sum, p) => sum + p.amount, 0);
+            return total + cashPayments;
+          }
+          if (sale.paymentMethod === "cash") {
+            return total + sale.totalAmount;
+          }
+          return total;
+        }, 0);
+
+        await ShiftSession.updateOne(
+          { _id: shiftId },
+          {
+            $set: {
+              expectedCashSales: expectedCashSales,
+              expectedClosingCash: shift.openingCash + expectedCashSales - (shift.cashExpenseTotal || 0),
+              updatedAt: new Date(),
+              updatedBy: modifiedBy,
+            }
+          }
+        );
+        stats.shiftUpdated += 1;
+
+        // Update Z-Report for this shift
+        const zReportUpdate = await updateZReportsForShift(shiftId, shift.openedAt, modifiedBy);
+        if (zReportUpdate) {
+          const result = await ZReport.updateOne(
+            { shiftSessionId: shiftId },
+            zReportUpdate
+          );
+          if (result.modifiedCount > 0) {
+            stats.zReportsUpdated += 1;
+          }
+        }
+      } catch (error) {
+        console.error(`Failed to update shift ${shiftId}:`, error.message);
+        stats.errors += 1;
+      }
+    }
+  }
+
   console.log("\nBackfill sale createdAt summary");
   console.table(stats);
   console.log(`Mode: ${dryRun ? "DRY RUN" : "APPLY"}`);
+  
+  if (dryRun) {
+    console.log("\n⚠️ DRY RUN - No changes were made. Use --apply to commit changes.");
+  }
+
   console.log("\n--- Input to UTC Conversion ---");
   console.log(`Input Start: ${startDateTimeRaw} -> ${formatUtc(startDateTime)}`);
   if (startDateParsed.normalized) {
@@ -337,6 +613,7 @@ async function main() {
   console.log(`Note: Each matched sale shifts to target date while preserving its original time-of-day.`);
   console.log(`Organization Scope: ${organizationIdRaw}`);
   console.log(`Location Scope: ${locationIdRaw || "ALL"}`);
+  console.log(`Modified By: ${modifiedByRaw || "NOT SET (audit trail unavailable)"}`);
 
   if (sampleRows.length > 0) {
     console.log(`\nPreview (first ${sampleRows.length} row(s))`);

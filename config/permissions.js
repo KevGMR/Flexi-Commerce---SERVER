@@ -9,6 +9,9 @@ const PERMISSIONS = {
   EDIT_SALE: "edit_sale",
   DELETE_SALE: "delete_sale",
   REFUND_SALE: "refund_sale",
+  
+  // NEW: Backdate Sales Permission
+  BACKDATE_SALES: "backdate_sales",  // <-- ADD THIS
 
   // POS Permissions
   POS_OVERRIDE_PRICE: "pos:override_price",
@@ -85,7 +88,7 @@ const PERMISSIONS = {
   DELIVERY_FEES_ASSIGN_DRIVER: "delivery_fees.assign_driver",
   DELIVERY_FEES_UPDATE_STATUS: "delivery_fees.update_status",
 
-  // NEW: Customer Permissions
+  // Customer Permissions
   VIEW_CUSTOMERS: "view_customers",
   CREATE_CUSTOMERS: "create_customers",
 };
@@ -96,6 +99,7 @@ const CRITICAL_PERMISSIONS = [
   PERMISSIONS.DELETE_USER,
   PERMISSIONS.BAN_USER,
   PERMISSIONS.DELETE_SALE,
+  PERMISSIONS.BACKDATE_SALES,  // <-- ADD THIS (backdating is critical)
   PERMISSIONS.DELETE_INVOICE,
   PERMISSIONS.MANAGE_ROLES,
   PERMISSIONS.ASSIGN_PERMISSIONS,
@@ -120,11 +124,14 @@ const ROLE_PERMISSIONS = {
     PERMISSIONS.EDIT_SALE,
     PERMISSIONS.REFUND_SALE,
     
-      // POS
-      PERMISSIONS.POS_OVERRIDE_PRICE,
-      PERMISSIONS.POS_ACCESS_SHOPIFY_PRODUCTS,
-      PERMISSIONS.POS_APPLY_DISCOUNT,
-      PERMISSIONS.POS_VIEW_COST,
+    // NEW: Backdate Sales (Managers can backdate)
+    PERMISSIONS.BACKDATE_SALES,  // <-- ADD THIS
+    
+    // POS
+    PERMISSIONS.POS_OVERRIDE_PRICE,
+    PERMISSIONS.POS_ACCESS_SHOPIFY_PRODUCTS,
+    PERMISSIONS.POS_APPLY_DISCOUNT,
+    PERMISSIONS.POS_VIEW_COST,
     
     // Reporting
     PERMISSIONS.VIEW_REPORTS,
@@ -175,16 +182,16 @@ const ROLE_PERMISSIONS = {
     // Settings
     PERMISSIONS.VIEW_SETTINGS,
 
-    // NEW: Customers
+    // Customers
     PERMISSIONS.VIEW_CUSTOMERS,
     PERMISSIONS.CREATE_CUSTOMERS,
   ],
   
   Cashier: [
+    // POS (limited - no price override or cost view)
+    PERMISSIONS.POS_ACCESS_SHOPIFY_PRODUCTS,
+    PERMISSIONS.POS_APPLY_DISCOUNT,
     
-      // POS (limited - no price override or cost view)
-      PERMISSIONS.POS_ACCESS_SHOPIFY_PRODUCTS,
-      PERMISSIONS.POS_APPLY_DISCOUNT,
     // Sales
     PERMISSIONS.CREATE_SALE,
     PERMISSIONS.VIEW_SALE_HISTORY,
@@ -277,6 +284,10 @@ const PERMISSION_GROUPS = {
   customers: [
     PERMISSIONS.VIEW_CUSTOMERS,
     PERMISSIONS.CREATE_CUSTOMERS,
+  ],
+  // NEW: Backdate Sales Group
+  backdate: [
+    PERMISSIONS.BACKDATE_SALES,
   ],
 };
 

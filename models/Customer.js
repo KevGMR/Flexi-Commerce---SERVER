@@ -27,6 +27,7 @@ const customerSchema = new Schema(
       state: String,
       postalCode: String,
       country: String,
+      landmark: String,
     },
     loyaltyPoints: {
       type: Number,
@@ -50,6 +51,7 @@ const customerSchema = new Schema(
 
 customerSchema.index({ organizationId: 1, fullname: 1 });
 customerSchema.index({ organizationId: 1, email: 1 });
+customerSchema.index({ organizationId: 1, phone: 1 });
 customerSchema.index({ organizationId: 1, loyaltyPoints: -1 });
 
 const Customer = mongoose.model("Customer", customerSchema);

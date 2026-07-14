@@ -16,6 +16,7 @@ const rolePermissionRouter = require("./controllers/RolePermission");
 const auditLogRouter = require("./controllers/AuditLog");
 const commissionRouter = require("./controllers/Commission");
 const customerRouter = require("./controllers/Customer");
+const backdateRouter = require("./controllers/Backdate");
 
 // E-commerce Controllers (Week 3)
 const productRouter = require("./controllers/Product");
@@ -159,6 +160,15 @@ app.use("/transactions", verifyToken, checkUserStatus, transactionValidationRout
 app.use("/commissions", verifyToken, checkUserStatus, commissionRouter);
 
 app.use("/customers", verifyToken, checkUserStatus, customerRouter);
+
+// Admin - Backdate Sales (Requires BACKDATE_SALES permission)
+app.use(
+  "/admin/backdate-sales",
+  verifyToken,
+  checkUserStatus,
+  requirePermission(PERMISSIONS.BACKDATE_SALES),
+  backdateRouter
+);
 
 // 404 Handler
 app.use((req, res) => {

@@ -17,7 +17,7 @@ const { sendEmailVerification, sendPasswordReset, sendOrganizationInvitation } =
 const { verifyToken, verifyRefreshTokenMiddleware, extractDeviceId, requireOrganization } = require("../middleware/auth");
 const { checkUserStatus } = require("../middleware/userStatusCheck");
 const { loginLimiter, registrationLimiter, refreshLimiter, passwordResetLimiter } = require("../middleware/rateLimiter");
-const { getEffectivePermissionsForMembership, getMembershipPermissionsForRole } = require("../utils/effectivePermissions");
+const { getEffectivePermissionsForMembership, getMembershipPermissionsForRole, syncRoleWithConfig } = require("../utils/effectivePermissions");
 const { requirePermission } = require("../middleware/permissionCheck");
 
 const saltRounds = Number(process.env.SALT) || 10;
@@ -930,15 +930,14 @@ router.put("/:userId", verifyToken, async (req, res) => {
 });
 
 /**
- * NEW: Get single user by ID
  * GET /users/:userId
+ * Get user details including their organization membership and custom permissions
  */
 router.get("/:userId", verifyToken, requirePermission(PERMISSIONS.VIEW_USERS), async (req, res) => {
   try {
     const { userId } = req.params;
     const { organizationId } = req.user;
 
-    // Verify user belongs to the organization
     const membership = await UserOrganization.findOne({
       userId,
       organizationId,
@@ -959,11 +958,179 @@ router.get("/:userId", verifyToken, requirePermission(PERMISSIONS.VIEW_USERS), a
 
     return res.status(200).json({
       success: true,
-      user,
+      user: {
+        ...user,
+        role: membership.role,
+        permissions: membership.permissions || [],
+        customPermissions: membership.customPermissions || [],
+        locations: membership.locations || [],
+      },
     });
   } catch (error) {
     console.error("Get user error:", error);
     return res.status(500).json({ error: "Failed to fetch user" });
+  }
+});
+
+/**
+ * PATCH /users/:userId/membership
+ * Update user's organization membership (role, locations, customPermissions)
+ * Requires MANAGE_USERS or EDIT_USER permission
+ */
+router.patch("/:userId/membership", verifyToken, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { organizationId } = req.user;
+    const { role, locations, customPermissions } = req.body;
+
+    if (!req.user.permissions?.includes(PERMISSIONS.MANAGE_USERS) &&
+        !req.user.permissions?.includes(PERMISSIONS.EDIT_USER)) {
+      return res.status(403).json({
+        error: "Access denied. Insufficient permissions.",
+        requiredPermissions: [PERMISSIONS.MANAGE_USERS, PERMISSIONS.EDIT_USER],
+      });
+    }
+
+    if (role !== undefined) {
+      const validRoles = ["Owner", "Manager", "Cashier", "Employee"];
+      if (!validRoles.includes(role)) {
+        return res.status(400).json({ error: "Invalid role. Must be one of: " + validRoles.join(", ") });
+      }
+    }
+
+    const membership = await UserOrganization.findOne({
+      userId,
+      organizationId,
+      status: "active",
+    });
+
+    if (!membership) {
+      return res.status(404).json({ error: "User not found in this organization" });
+    }
+
+    if (role) {
+      membership.role = role;
+      const permissions = await getMembershipPermissionsForRole(role);
+      membership.permissions = permissions;
+    }
+
+    if (locations !== undefined) {
+      if (!Array.isArray(locations)) {
+        return res.status(400).json({ error: "locations must be an array of location IDs" });
+      }
+      membership.locations = locations;
+    }
+
+    if (customPermissions !== undefined) {
+      if (!Array.isArray(customPermissions)) {
+        return res.status(400).json({ error: "customPermissions must be an array" });
+      }
+      const { isValidPermission } = require("../config/permissions");
+      for (const perm of customPermissions) {
+        if (!isValidPermission(perm)) {
+          return res.status(400).json({ error: `Invalid permission: ${perm}` });
+        }
+      }
+      membership.customPermissions = customPermissions;
+    }
+
+    await membership.save();
+
+    await logTokenEvent(
+      req.user.userId,
+      organizationId,
+      "user_membership_updated",
+      req.ip,
+      req.get("user-agent"),
+      {
+        details: `Updated membership for user ${userId}`,
+        changes: { role, locations, customPermissions },
+      }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "User membership updated successfully",
+      membership: {
+        role: membership.role,
+        permissions: membership.permissions,
+        customPermissions: membership.customPermissions,
+        locations: membership.locations,
+      },
+    });
+  } catch (error) {
+    console.error("Update membership error:", error);
+    return res.status(500).json({ error: "Failed to update user membership" });
+  }
+});
+
+/**
+ * POST /users/:userId/sync-permissions
+ * Recalculate role-based permissions for a user, preserving customPermissions
+ * Also syncs the Role document from config if missing permissions
+ * Requires MANAGE_USERS or EDIT_USER permission
+ */
+router.post("/:userId/sync-permissions", verifyToken, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { organizationId } = req.user;
+
+    if (!req.user.permissions?.includes(PERMISSIONS.MANAGE_USERS) &&
+        !req.user.permissions?.includes(PERMISSIONS.EDIT_USER)) {
+      return res.status(403).json({
+        error: "Access denied. Insufficient permissions.",
+        requiredPermissions: [PERMISSIONS.MANAGE_USERS, PERMISSIONS.EDIT_USER],
+      });
+    }
+
+    const membership = await UserOrganization.findOne({
+      userId,
+      organizationId,
+      status: "active",
+    });
+
+    if (!membership) {
+      return res.status(404).json({ error: "User not found in this organization" });
+    }
+
+    // 1. Sync the role definition from config
+    const updatedRole = await syncRoleWithConfig(membership.role);
+    if (!updatedRole) {
+      return res.status(500).json({ error: "Failed to sync role definition" });
+    }
+
+    // 2. Now sync the user's permissions from the updated role
+    const newPermissions = updatedRole.permissions || [];
+    membership.permissions = newPermissions;
+    // customPermissions are left untouched
+    await membership.save();
+
+    await logTokenEvent(
+      req.user.userId,
+      organizationId,
+      "user_permissions_synced",
+      req.ip,
+      req.get("user-agent"),
+      {
+        details: `Synced permissions for user ${userId} based on role ${membership.role}`,
+        permissions: newPermissions,
+        customPermissions: membership.customPermissions,
+      }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Role and user permissions synced successfully",
+      membership: {
+        role: membership.role,
+        permissions: membership.permissions,
+        customPermissions: membership.customPermissions,
+        locations: membership.locations,
+      },
+    });
+  } catch (error) {
+    console.error("Sync permissions error:", error);
+    return res.status(500).json({ error: "Failed to sync permissions" });
   }
 });
 
@@ -1008,7 +1175,7 @@ router.get("/", verifyToken, requirePermission(PERMISSIONS.VIEW_USERS), async (r
 
     const total = await User.countDocuments(query);
     const users = await User.find(query)
-      .select("_id fullname email phone avatarUrl status emailVerified lastLogin createdAt updatedAt commissionOverrides")
+      .select("_id fullname email phone avatarUrl status emailVerified lastLogin createdAt updatedAt commissionOverrides customPermissions")
       .sort({ createdAt: -1 })
       .skip((parseInt(page) - 1) * parseInt(limit))
       .limit(parseInt(limit))

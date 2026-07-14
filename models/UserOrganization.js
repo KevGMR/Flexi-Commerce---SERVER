@@ -21,6 +21,7 @@ const userOrganizationSchema = new Schema(
       type: [String],
       default: [],
     },
+    customPermissions: { type: [String], default: [] },
     locations: {
       type: [String],
       default: [],

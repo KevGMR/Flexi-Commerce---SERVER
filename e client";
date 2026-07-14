@@ -1,0 +1,8 @@
+  feature/permissions-seed-and-propagation            [m 5f77a64 feat(server): implement live role permissions for Owner/Manager memberships
+  feature/pos-total-expenses-server                   [m 56bba1e feat(reports): include totalExpenses and netProfitAfterExpenses in sales summary; normalize ObjectId for aggregation
+  feature/pos/previous-day-shift-block                [m e7eb8c9 feat(pos): backdate shift close; add closeBackdated audit and prevent transactions while previous-day shift open
+  feature/pos/reports-enhancements                    [m e4100c7 Count services in sales summary
+  feature/pos/subtotal-exclude-credit-discount-backend[m 53937e9 feat(reports): add subtotalExclCreditAndDiscount to sales summary (exclude exchange credit and discounts)
+  feature/sale-reservation-edit                       [m 8fc9e4f before pos update
+  fix/shift-till-visibility                           [m 0fd7e1b Fix shift-reconciliation sync and auto-attach behavior
+* [32mmain                                                [m 079da79 [ahead 3] feat: added customer to system

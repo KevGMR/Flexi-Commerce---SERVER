@@ -76,6 +76,37 @@ router.post("/", verifyToken, requirePermission(PERMISSIONS.CREATE_CUSTOMERS), a
 });
 
 /**
+ * PUT /customers/:id
+ * Update customer details
+ */
+router.put("/:id", verifyToken, requirePermission(PERMISSIONS.VIEW_CUSTOMERS), async (req, res) => {
+  try {
+    const { organizationId } = req.user;
+    const { id } = req.params;
+    const { fullname, email, phone, address, notes, tags } = req.body;
+
+    const customer = await Customer.findOne({ _id: id, organizationId });
+    if (!customer) {
+      return res.status(404).json({ error: "Customer not found" });
+    }
+
+    if (fullname) customer.fullname = fullname;
+    if (email !== undefined) customer.email = email ? email.toLowerCase() : undefined;
+    if (phone !== undefined) customer.phone = phone;
+    if (address) customer.address = address;
+    if (notes !== undefined) customer.notes = notes;
+    if (tags) customer.tags = tags;
+
+    await customer.save();
+
+    res.json({ success: true, customer });
+  } catch (error) {
+    console.error("Update customer error:", error);
+    res.status(500).json({ error: "Failed to update customer" });
+  }
+});
+
+/**
  * PATCH /customers/:id/loyalty
  * Add or subtract loyalty points for a customer
  */

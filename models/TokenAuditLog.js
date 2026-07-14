@@ -65,6 +65,7 @@ const tokenAuditLogSchema = new Schema(
         "product_updated",
         "product_created",
         "invitation_resent",
+        "user_permissions_synced"
         
       ],
     },
