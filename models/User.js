@@ -5,8 +5,7 @@ const Schema = mongoose.Schema;
 // Sub‑schema for commission overrides
 const commissionOverrideSchema = new Schema({
   serviceId: {
-    type: Schema.Types.ObjectId,
-    ref: 'Product',
+    type: String,  // was: type: Schema.Types.ObjectId, ref: 'Product'
     required: true,
   },
   commissionType: {
@@ -27,7 +26,7 @@ const commissionOverrideSchema = new Schema({
     type: Date,
     default: Date.now,
   },
-}, { _id: false }); // no separate _id for sub‑documents
+}, { _id: false });
 
 const userSchema = new Schema(
   {
@@ -82,7 +81,7 @@ const userSchema = new Schema(
     lastPermissionChange: {
       type: Date,
     },
-    // NEW: commission overrides per service
+    // NEW: commission overrides per service (serviceId can be product ID or composite key)
     commissionOverrides: {
       type: [commissionOverrideSchema],
       default: [],
@@ -93,7 +92,6 @@ const userSchema = new Schema(
 
 // Existing indexes
 userSchema.index({ status: 1 });
-// Add index for faster lookup of overrides by user? Not needed.
 
 const User = mongoose.model("User", userSchema);
 

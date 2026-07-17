@@ -21,6 +21,7 @@ const productSchema = new Schema(
       enum: ["single", "bundle"],
       default: "single",
     },
+    // --- DEPRECATED: old bundle structure (kept for backward compatibility) ---
     serviceBundleComponents: [
       {
         serviceProductId: { type: Schema.Types.ObjectId, ref: "Product" },
@@ -30,17 +31,42 @@ const productSchema = new Schema(
         priceSnapshot: { type: Number, min: 0 },
       },
     ],
-    // Commission defaults
+    // --- NEW: inline bundle sub‑services (used when serviceKind === 'bundle') ---
+    bundleSubServices: [
+      {
+        name: { type: String, required: true },
+        laborCost: { type: Number, default: 0, min: 0 },
+        // ❌ productCost removed – completely removed
+        commissionDeductionTiming: {
+          type: String,
+          enum: ["before_commission", "after_deductions"],
+          default: "before_commission",
+        },
+        commissionType: {
+          type: String,
+          enum: ["percentage", "fixed"],
+          default: "percentage",
+        },
+        commissionValue: { type: Number, default: 0, min: 0 },
+        // ✅ NEW: flag to indicate the aggregator
+        isAggregator: { type: Boolean, default: false },
+        // Optional: default user to assign when added to cart
+        defaultAssignedUser: {
+          type: Schema.Types.ObjectId,
+          ref: "User",
+        },
+      },
+    ],
+    // Commission defaults (for single services)
     commissionType: {
       type: String,
       enum: ["percentage", "fixed"],
       default: "percentage",
     },
     commissionValue: { type: Number, default: 0, min: 0 },
-    // --- NEW cost fields ---
+    // Cost fields (for single services – laborCost and productCost remain)
     laborCost: { type: Number, default: 0, min: 0 },
     productCost: { type: Number, default: 0, min: 0 },
-    // ---
     status: {
       type: String,
       enum: ["active", "archived", "draft"],
@@ -84,6 +110,7 @@ productSchema.index({ organizationId: 1, sku: 1 }, { unique: true });
 productSchema.index({ organizationId: 1, tags: 1 });
 productSchema.index({ organizationId: 1, collectionIds: 1 });
 productSchema.index({ organizationId: 1, createdAt: -1 });
+productSchema.index({ organizationId: 1, serviceKind: 1 });
 
 const Product = mongoose.model("Product", productSchema);
 module.exports = Product;
