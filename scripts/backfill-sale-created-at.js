@@ -1,3 +1,5 @@
+// server/scripts/backfill-sale-created-at.js
+
 require("dotenv").config();
 const mongoose = require("mongoose");
 

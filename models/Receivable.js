@@ -1,3 +1,5 @@
+// server/models/Receivable.js
+
 const mongoose = require("mongoose");
 
 const receivableSchema = new mongoose.Schema(

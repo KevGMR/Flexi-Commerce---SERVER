@@ -1,3 +1,5 @@
+// server/models/TokenAuditLog.js
+
 const mongoose = require("mongoose");
 
 const Schema = mongoose.Schema;
@@ -65,8 +67,9 @@ const tokenAuditLogSchema = new Schema(
         "product_updated",
         "product_created",
         "invitation_resent",
-        "user_permissions_synced"
-        
+        "user_permissions_synced",
+        "backdate_applied",
+        "backdate_rolled_back"
       ],
     },
     permission: {

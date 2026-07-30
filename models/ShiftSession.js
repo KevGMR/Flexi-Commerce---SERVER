@@ -1,3 +1,5 @@
+// server/models/ShiftSession.js
+
 const mongoose = require("mongoose");
 
 const shiftSessionSchema = new mongoose.Schema(

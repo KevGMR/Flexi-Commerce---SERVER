@@ -1,3 +1,5 @@
+// server/models/ZReport.js
+
 const mongoose = require("mongoose");
 
 const zReportSchema = new mongoose.Schema(

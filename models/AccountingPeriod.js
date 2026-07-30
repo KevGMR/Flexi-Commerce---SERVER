@@ -1,3 +1,5 @@
+// server/models/AccountingPeriod.js
+
 const mongoose = require("mongoose");
 
 const accountingPeriodSchema = new mongoose.Schema(

@@ -1,3 +1,6 @@
+// server/index.js
+
+
 const axios = require("axios");
 const express = require("express");
 const mongoose = require("mongoose");
@@ -16,7 +19,9 @@ const rolePermissionRouter = require("./controllers/RolePermission");
 const auditLogRouter = require("./controllers/AuditLog");
 const commissionRouter = require("./controllers/Commission");
 const customerRouter = require("./controllers/Customer");
-const backdateRouter = require("./controllers/Backdate");
+// const backdateRouter = require("./controllers/Backdate");
+const backdateRouter = require("./controllers/BackdateController");
+
 
 // E-commerce Controllers (Week 3)
 const productRouter = require("./controllers/Product");
@@ -161,9 +166,9 @@ app.use("/commissions", verifyToken, checkUserStatus, commissionRouter);
 
 app.use("/customers", verifyToken, checkUserStatus, customerRouter);
 
-// Admin - Backdate Sales (Requires BACKDATE_SALES permission)
+// Admin - Backdate (Requires BACKDATE_SALES permission)
 app.use(
-  "/admin/backdate-sales",
+  "/admin",
   verifyToken,
   checkUserStatus,
   requirePermission(PERMISSIONS.BACKDATE_SALES),
