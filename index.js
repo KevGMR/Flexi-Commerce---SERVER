@@ -10,6 +10,8 @@ const helmet = require("helmet");
 const compression = require("compression");
 const cookieParser = require("cookie-parser");
 
+
+
 require("dotenv").config();
 
 const userRouter = require("./controllers/User");
@@ -90,8 +92,11 @@ app.use(apiLimiter);
 
 // Database Connection
 mongoose
-  .connect(`${process.env.MONGO_URI}`)
-  .then(() => {
+  .connect(`${process.env.MONGO_URI}`, {
+    tls: true,
+    ssl: true,
+    family: 4 
+  }).then(() => {
     app.listen(port, () => {
       console.log(`MongoDB connection is active 👌`);
       console.log(`Server active on port ${port}`);

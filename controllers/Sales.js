@@ -1,3 +1,4 @@
+// server/controllers/Sales.js
 const express = require("express");
 const router = express.Router();
 const mongoose = require("mongoose");
@@ -10,6 +11,7 @@ const Receivable = require("../models/Receivable");
 const ShopifyConnection = require("../models/ShopifyConnection");
 const UserOrganization = require("../models/UserOrganization");
 const Organization = require("../models/Organization");
+const Variant = require("../models/Variant")
 const {
   updateShopifyInventory,
   queueInventoryUpdate,
@@ -361,15 +363,62 @@ const createSale = async (req, res) => {
     // First pass: enrich items and collect service data
     for (const item of items) {
       if (item.type === "flexi") {
-        const product = await Product.findOne({
-          _id: item.productId,
+        if (!item.variantId) {
+          return res.status(400).json({
+            success: false,
+            message: "Flexi items require variantId",
+          });
+        }
+
+        const variant = await Variant.findOne({
+          _id: item.variantId,
           organizationId,
-        });
+        }).lean();
+
+        if (!variant) {
+          return res.status(404).json({
+            success: false,
+            message: `Flexi variant ${item.variantId} not found`,
+          });
+        }
+
+        const product = await Product.findOne({
+          _id: variant.productId,
+          organizationId,
+        })
+          .select("name sku")
+          .lean();
+
         if (!product) {
           return res.status(404).json({
             success: false,
-            message: `FLEXI product ${item.productId} not found`,
+            message: `Flexi product for variant ${item.variantId} not found`,
           });
+        }
+
+        // Stock gate (skip for untracked variants and continueSelling variants)
+        if (variant.trackInventory !== false && !variant.continueSellingWhenOutOfStock) {
+          const inv = await Inventory.findOne({
+            organizationId,
+            variantId: variant._id,
+            locationId,
+          })
+            .select("available onHand")
+            .lean();
+
+          const available = inv?.available ?? inv?.onHand ?? 0;
+          const requested = Number(item.quantity) || 0;
+
+          if (available < requested) {
+            return res.status(400).json({
+              success: false,
+              message: `Insufficient stock for "${product.name}"${
+                variant.selectedOptions?.length
+                  ? ` (${variant.selectedOptions.map((o) => o.value).join(" / ")})`
+                  : ""
+              }. Available: ${available}, requested: ${requested}.`,
+            });
+          }
         }
 
         const originalUnitPrice = Number(item.unitPrice) || 0;
@@ -386,9 +435,13 @@ const createSale = async (req, res) => {
 
         const enrichedItem = {
           type: "flexi",
-          productId: item.productId,
+          productId: product._id,
+          variantId: variant._id,
+          variantTitle: Array.isArray(variant.selectedOptions)
+            ? variant.selectedOptions.map((o) => ({ name: o.name, value: o.value }))
+            : [],
           productName: product.name,
-          sku: product.sku,
+          sku: variant.sku || product.sku,
           quantity,
           unitPrice: originalUnitPrice,
           lineTotal,
@@ -404,17 +457,9 @@ const createSale = async (req, res) => {
           productCost: 0,
         };
 
-        const isBundleChild = item.isBundleChild === true;
-        // For bundle children, keep the price (do not zero out)
-        if (parentIndex !== null && !isBundleChild) {
-          enrichedItem.unitPrice = 0;
-          enrichedItem.lineTotal = 0;
-          enrichedItem.taxAmount = 0;
-        }
-
         enrichedItems.push(enrichedItem);
 
-        if (parentIndex === null || isBundleChild) {
+        if (parentIndex === null) {
           subtotal += lineTotal;
           totalTax += lineTax;
           totalDiscount += discount;
@@ -1637,6 +1682,10 @@ const reallocateSalePayment = async (req, res) => {
  * Helper: Process inventory updates for FLEXI and Shopify items
  * Executes within a MongoDB transaction session
  */
+/**
+ * Helper: Process inventory updates for FLEXI and Shopify items
+ * Executes within a MongoDB transaction session
+ */
 async function processInventoryUpdates(sale, organizationId, session) {
   const connection = await ShopifyConnection.findOne({ organizationId })
     .select("+clientId +clientSecret +accessToken +tokenExpiresAt")
@@ -1655,53 +1704,84 @@ async function processInventoryUpdates(sale, organizationId, session) {
   for (let i = 0; i < sale.items.length; i++) {
     const item = sale.items[i];
 
+    // ---------- FLEXI (variant-level) ----------
     if (item.type === "flexi") {
-      try {
-        const inventory = await Inventory.findOne({
-          productId: item.productId,
-          locationId: sale.locationId,
-        }).session(session);
-
-        if (inventory) {
-          const previousStock = inventory.quantity;
-          const newStock = Math.max(0, previousStock - item.quantity);
-
-          await Inventory.updateOne(
-            { _id: inventory._id },
-            {
-              $set: {
-                quantity: newStock,
-                lastModified: new Date(),
-              },
-            },
-            { session },
-          );
-
-          sale.inventoryUpdates.push({
-            itemId: i.toString(),
-            type: "flexi",
-            productId: item.productId,
-            quantityDeducted: item.quantity,
-            previousStock,
-            newStock,
-            status: "success",
-          });
-        }
-      } catch (error) {
-        console.error(
-          `[Sales] FLEXI inventory update failed for item ${i}:`,
-          error.message,
+      if (!item.variantId) {
+        throw new Error(
+          `Flexi item at index ${i} is missing variantId — cannot update inventory`,
         );
+      }
+
+      const inventory = await Inventory.findOne({
+        organizationId,
+        variantId: item.variantId,
+        locationId: sale.locationId,
+      }).session(session);
+
+      if (!inventory) {
+        // No inventory row at this location. Record and move on — the
+        // variant is sellable but the till's location has no stock line.
         sale.inventoryUpdates.push({
           itemId: i.toString(),
           type: "flexi",
+          variantId: item.variantId,
           productId: item.productId,
           quantityDeducted: item.quantity,
           status: "failed",
-          error: error.message,
+          error: `No inventory row for variant ${item.variantId} at location ${sale.locationId}`,
         });
+        continue;
       }
-    } else if (item.type === "shopify" && connection) {
+
+      const variant = await Variant.findById(item.variantId)
+        .select("trackInventory continueSellingWhenOutOfStock")
+        .session(session)
+        .lean();
+
+      const isTracked = variant?.trackInventory !== false;
+      const canOversell = variant?.continueSellingWhenOutOfStock === true;
+
+      const previousOnHand = inventory.onHand || 0;
+      const previousAvailable =
+        inventory.available ?? inventory.onHand ?? 0;
+
+      // In-transaction stock gate. Authoritative — the pre-check in createSale
+      // is best-effort UX; this is what actually stops overselling.
+      if (isTracked && !canOversell && previousAvailable < item.quantity) {
+        throw new Error(
+          `Insufficient stock for variant ${item.variantId} at location ${sale.locationId}. Available: ${previousAvailable}, requested: ${item.quantity}`,
+        );
+      }
+
+      const newOnHand = previousOnHand - item.quantity;
+      const newAvailable = previousAvailable - item.quantity;
+
+      await Inventory.updateOne(
+        { _id: inventory._id },
+        {
+          $set: {
+            onHand: newOnHand,
+            available: newAvailable,
+            lastModified: new Date(),
+          },
+        },
+        { session },
+      );
+
+      sale.inventoryUpdates.push({
+        itemId: i.toString(),
+        type: "flexi",
+        variantId: item.variantId,
+        productId: item.productId,
+        quantityDeducted: item.quantity,
+        previousStock: previousOnHand,
+        newStock: newOnHand,
+        status: "success",
+      });
+    }
+
+    // ---------- SHOPIFY (unchanged) ----------
+    else if (item.type === "shopify" && connection) {
       totalShopifyItems += 1;
       try {
         await updateShopifyInventory(
@@ -1800,6 +1880,7 @@ async function processInventoryUpdates(sale, organizationId, session) {
     }
   }
 
+  // Shopify sync status rollup (unchanged)
   if (totalShopifyItems > 0) {
     if (syncedCount === totalShopifyItems) {
       sale.shopifySyncStatus = "synced";
@@ -3016,6 +3097,9 @@ async function getPaymentMethodBreakdown({
 /**
  * Helper: Reverse inventory updates (used for voids and full refunds)
  */
+/**
+ * Helper: Reverse inventory updates (used for voids and full refunds)
+ */
 async function reverseInventoryUpdates(sale, organizationId) {
   const connection = await ShopifyConnection.findOne({ organizationId }).select(
     "+clientId +clientSecret +accessToken +tokenExpiresAt",
@@ -3028,22 +3112,41 @@ async function reverseInventoryUpdates(sale, organizationId) {
   for (let i = 0; i < sale.items.length; i++) {
     const item = sale.items[i];
 
+    // ---------- FLEXI (variant-level) ----------
     if (item.type === "flexi") {
+      if (!item.variantId) {
+        sale.inventoryUpdates.push({
+          itemId: i.toString(),
+          type: "flexi",
+          productId: item.productId,
+          quantityDeducted: -item.quantity,
+          status: "failed",
+          error: `Flexi item at index ${i} is missing variantId — cannot reverse`,
+        });
+        continue;
+      }
+
       try {
         const inventory = await Inventory.findOne({
-          productId: item.productId,
+          organizationId,
+          variantId: item.variantId,
           locationId: sale.locationId,
         });
 
         if (inventory) {
-          const previousStock = inventory.quantity || 0;
-          const newStock = previousStock + item.quantity;
+          const previousOnHand = inventory.onHand || 0;
+          const previousAvailable =
+            inventory.available ?? inventory.onHand ?? 0;
+
+          const newOnHand = previousOnHand + item.quantity;
+          const newAvailable = previousAvailable + item.quantity;
 
           await Inventory.updateOne(
             { _id: inventory._id },
             {
               $set: {
-                quantity: newStock,
+                onHand: newOnHand,
+                available: newAvailable,
                 lastModified: new Date(),
               },
             },
@@ -3052,11 +3155,22 @@ async function reverseInventoryUpdates(sale, organizationId) {
           sale.inventoryUpdates.push({
             itemId: i.toString(),
             type: "flexi",
+            variantId: item.variantId,
             productId: item.productId,
             quantityDeducted: -item.quantity,
-            previousStock,
-            newStock,
+            previousStock: previousOnHand,
+            newStock: newOnHand,
             status: "success",
+          });
+        } else {
+          sale.inventoryUpdates.push({
+            itemId: i.toString(),
+            type: "flexi",
+            variantId: item.variantId,
+            productId: item.productId,
+            quantityDeducted: -item.quantity,
+            status: "failed",
+            error: `No inventory row for variant ${item.variantId} at location ${sale.locationId}`,
           });
         }
       } catch (error) {
@@ -3067,13 +3181,17 @@ async function reverseInventoryUpdates(sale, organizationId) {
         sale.inventoryUpdates.push({
           itemId: i.toString(),
           type: "flexi",
+          variantId: item.variantId,
           productId: item.productId,
           quantityDeducted: -item.quantity,
           status: "failed",
           error: error.message,
         });
       }
-    } else if (item.type === "shopify" && connection) {
+    }
+
+    // ---------- SHOPIFY (unchanged) ----------
+    else if (item.type === "shopify" && connection) {
       try {
         await updateShopifyInventory(
           organizationId,
@@ -3176,22 +3294,29 @@ async function reverseInventoryForItems(sale, organizationId, refundedItems) {
   for (const refundItem of refundedItems) {
     const { itemIndex, quantity, saleItem } = refundItem;
 
+    // ---------- FLEXI (variant-level) ----------
     if (saleItem.type === "flexi") {
       try {
         const inventory = await Inventory.findOne({
-          productId: saleItem.productId,
+          organizationId,
+          variantId: saleItem.variantId,
           locationId: sale.locationId,
         });
 
         if (inventory) {
-          const previousStock = inventory.quantity || 0;
-          const newStock = previousStock + quantity;
+          const previousOnHand = inventory.onHand || 0;
+          const previousAvailable =
+            inventory.available ?? inventory.onHand ?? 0;
+
+          const newOnHand = previousOnHand + quantity;
+          const newAvailable = previousAvailable + quantity;
 
           await Inventory.updateOne(
             { _id: inventory._id },
             {
               $set: {
-                quantity: newStock,
+                onHand: newOnHand,
+                available: newAvailable,
                 lastModified: new Date(),
               },
             },
@@ -3200,11 +3325,22 @@ async function reverseInventoryForItems(sale, organizationId, refundedItems) {
           sale.inventoryUpdates.push({
             itemId: `refund-${itemIndex}`,
             type: "flexi",
+            variantId: saleItem.variantId,
             productId: saleItem.productId,
             quantityDeducted: -quantity,
-            previousStock,
-            newStock,
+            previousStock: previousOnHand,
+            newStock: newOnHand,
             status: "success",
+          });
+        } else {
+          sale.inventoryUpdates.push({
+            itemId: `refund-${itemIndex}`,
+            type: "flexi",
+            variantId: saleItem.variantId,
+            productId: saleItem.productId,
+            quantityDeducted: -quantity,
+            status: "failed",
+            error: `No inventory row for variant ${saleItem.variantId} at location ${sale.locationId}`,
           });
         }
       } catch (error) {
@@ -3215,13 +3351,17 @@ async function reverseInventoryForItems(sale, organizationId, refundedItems) {
         sale.inventoryUpdates.push({
           itemId: `refund-${itemIndex}`,
           type: "flexi",
+          variantId: saleItem.variantId,
           productId: saleItem.productId,
           quantityDeducted: -quantity,
           status: "failed",
           error: error.message,
         });
       }
-    } else if (saleItem.type === "shopify" && connection) {
+    }
+
+    // ---------- SHOPIFY (unchanged) ----------
+    else if (saleItem.type === "shopify" && connection) {
       try {
         await updateShopifyInventory(
           organizationId,
@@ -3258,39 +3398,39 @@ async function reverseInventoryForItems(sale, organizationId, refundedItems) {
             error: error.message,
           });
         } else {
-        try {
-          await queueInventoryUpdate(
-            organizationId,
-            null,
-            saleItem.shopifyVariantId,
-            quantity,
-            null,
-            sale._id,
-            flexiLocation?.shopifyLocationId,
-          );
+          try {
+            await queueInventoryUpdate(
+              organizationId,
+              null,
+              saleItem.shopifyVariantId,
+              quantity,
+              null,
+              sale._id,
+              flexiLocation?.shopifyLocationId,
+            );
 
-          sale.inventoryUpdates.push({
-            itemId: `refund-${itemIndex}`,
-            type: "shopify",
-            shopifyVariantId: saleItem.shopifyVariantId,
-            quantityDeducted: -quantity,
-            status: "pending",
-            error: error.message,
-          });
-        } catch (queueError) {
-          console.error(
-            `[Sales] Queueing Shopify refund reversal failed for item ${itemIndex}:`,
-            queueError.message,
-          );
-          sale.inventoryUpdates.push({
-            itemId: `refund-${itemIndex}`,
-            type: "shopify",
-            shopifyVariantId: saleItem.shopifyVariantId,
-            quantityDeducted: -quantity,
-            status: "failed",
-            error: queueError.message,
-          });
-        }
+            sale.inventoryUpdates.push({
+              itemId: `refund-${itemIndex}`,
+              type: "shopify",
+              shopifyVariantId: saleItem.shopifyVariantId,
+              quantityDeducted: -quantity,
+              status: "pending",
+              error: error.message,
+            });
+          } catch (queueError) {
+            console.error(
+              `[Sales] Queueing Shopify refund reversal failed for item ${itemIndex}:`,
+              queueError.message,
+            );
+            sale.inventoryUpdates.push({
+              itemId: `refund-${itemIndex}`,
+              type: "shopify",
+              shopifyVariantId: saleItem.shopifyVariantId,
+              quantityDeducted: -quantity,
+              status: "failed",
+              error: queueError.message,
+            });
+          }
         }
       }
     }

@@ -1,3 +1,4 @@
+// server/models/Sale.js
 const mongoose = require("mongoose");
 
 const saleSchema = new mongoose.Schema(
@@ -47,13 +48,26 @@ const saleSchema = new mongoose.Schema(
           enum: ["flexi", "shopify", "service"],
           required: true,
         },
-        productId: mongoose.Schema.Types.ObjectId, // FLEXI product ref (if type=flexi)
-        shopifyVariantId: String, // Shopify variant ref (if type=shopify)
-        serviceBundle: {
-          isBundle: {
-            type: Boolean,
-            default: false,
+
+        // ---- FLEXI refs ----
+        productId: mongoose.Schema.Types.ObjectId,   // convenience for reporting
+        variantId: {                                  // NEW — authoritative for stock
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "Variant",
+          index: true,
+        },
+        variantTitle: [                               // NEW — snapshot of selectedOptions
+          {
+            name: { type: String, required: true },
+            value: { type: String, required: true },
           },
+        ],
+
+        // ---- Shopify ref ----
+        shopifyVariantId: String,
+
+        serviceBundle: {
+          isBundle: { type: Boolean, default: false },
           bundleName: String,
           components: [
             {
@@ -66,67 +80,26 @@ const saleSchema = new mongoose.Schema(
             },
           ],
         },
-        productName: String, // Snapshot
-        sku: String, // Snapshot
-        quantity: {
-          type: Number,
-          required: true,
-          min: 1,
-        },
-        quantityRefunded: {
-          type: Number,
-          default: 0,
-          min: 0,
-        },
-        unitPrice: {
-          type: Number,
-          required: true,
-          min: 0,
-        },
-        lineTotal: {
-          type: Number,
-          required: true,
-          min: 0,
-        },
-        discount: {
-          type: Number,
-          default: 0,
-          min: 0,
-        },
-        taxAmount: {
-          type: Number,
-          default: 0,
-          min: 0,
-        },
 
-        // NEW: Service attachment and commission fields
-        parentItemIndex: {
-          type: Number,
-          default: null, // points to index in the same items array
-        },
-        originalPrice: {
-          type: Number,
-          default: 0, // stores the real unit price for attached products (before zeroing)
-        },
+        productName: String,
+        sku: String,
+        quantity: { type: Number, required: true, min: 1 },
+        quantityRefunded: { type: Number, default: 0, min: 0 },
+        unitPrice: { type: Number, required: true, min: 0 },
+        lineTotal: { type: Number, required: true, min: 0 },
+        discount: { type: Number, default: 0, min: 0 },
+        taxAmount: { type: Number, default: 0, min: 0 },
+
+        parentItemIndex: { type: Number, default: null },
+        originalPrice: { type: Number, default: 0 },
         assignedUser: {
           type: mongoose.Schema.Types.ObjectId,
           ref: "User",
-          default: null, // service-level override
+          default: null,
         },
-        commissionAmount: {
-          type: Number,
-          default: 0,
-          min: 0,
-        },
-        commissionType: {
-          type: String,
-          enum: ["percentage", "fixed"],
-        },
-        commissionValue: {
-          type: Number,
-          default: 0,
-          min: 0,
-        },
+        commissionAmount: { type: Number, default: 0, min: 0 },
+        commissionType: { type: String, enum: ["percentage", "fixed"] },
+        commissionValue: { type: Number, default: 0, min: 0 },
       },
     ],
 
@@ -328,13 +301,19 @@ const saleSchema = new mongoose.Schema(
     // Inventory Impact
     inventoryUpdates: [
       {
-        itemId: String, // Reference to sale item index
-        type: {
-          type: String,
-          enum: ["flexi", "shopify"],
+        itemId: String,
+        type: { type: String, enum: ["flexi", "shopify"] },
+
+        // FLEXI — variant is the key, product is informational
+        variantId: {                                   // NEW
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "Variant",
         },
-        productId: mongoose.Schema.Types.ObjectId, // FLEXI product
-        shopifyVariantId: String, // Shopify variant
+        productId: mongoose.Schema.Types.ObjectId,
+
+        // Shopify
+        shopifyVariantId: String,
+
         quantityDeducted: Number,
         previousStock: Number,
         newStock: Number,
@@ -344,10 +323,7 @@ const saleSchema = new mongoose.Schema(
           default: "pending",
         },
         error: String,
-        timestamp: {
-          type: Date,
-          default: Date.now,
-        },
+        timestamp: { type: Date, default: Date.now },
       },
     ],
 
@@ -496,5 +472,6 @@ saleSchema.index({
 
 // Additional index for assignedUser
 saleSchema.index({ assignedUser: 1, createdAt: -1 });
+saleSchema.index({ "items.variantId": 1, createdAt: -1 }); // Flexi variant sales lookup
 
 module.exports = mongoose.model("Sale", saleSchema);

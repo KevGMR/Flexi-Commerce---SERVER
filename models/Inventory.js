@@ -1,5 +1,4 @@
 const mongoose = require("mongoose");
-
 const Schema = mongoose.Schema;
 
 const inventorySchema = new Schema(
@@ -19,53 +18,32 @@ const inventorySchema = new Schema(
       ref: "Location",
       required: true,
     },
-    // Inventory quantities
-    onHand: {
-      type: Number,
-      default: 0,
-      min: 0,
-    },
-    available: {
-      type: Number,
-      default: 0,
-      min: 0,
-      // Calculated: onHand - committed
-    },
-    committed: {
-      type: Number,
-      default: 0,
-      min: 0,
-      // Reserved for orders
-    },
-    unavailable: {
-      type: Number,
-      default: 0,
-      min: 0,
-      // Damaged, lost, etc.
-    },
-    // Reorder levels
+
+    // Relaxed: negatives allowed (Shopify oversell history)
+    onHand: { type: Number, default: 0 },
+    available: { type: Number, default: 0 },
+
+    committed: { type: Number, default: 0, min: 0 },
+    unavailable: { type: Number, default: 0, min: 0 },
+
     reorderPoint: Number,
     reorderQuantity: Number,
-    // Last audit
     lastAuditedAt: Date,
-    auditedBy: {
-      type: Schema.Types.ObjectId,
-      ref: "User",
-    },
+    auditedBy: { type: Schema.Types.ObjectId, ref: "User" },
+
+    // migration traceability
+    importedAt: Date,
+    migratedFromQuantity: Number, // raw value from export (for audit)
   },
   { timestamps: true }
 );
 
-// Compound unique index: one inventory record per variant per location
 inventorySchema.index(
   { organizationId: 1, variantId: 1, locationId: 1 },
   { unique: true }
 );
-
-// Indexes for queries
 inventorySchema.index({ organizationId: 1, locationId: 1 });
 inventorySchema.index({ organizationId: 1, variantId: 1 });
 
 const Inventory = mongoose.model("Inventory", inventorySchema);
-
 module.exports = Inventory;
