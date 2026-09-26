@@ -38,6 +38,7 @@ const variantSchema = new Schema(
         url: String,
         alt: String,
         isDefault: Boolean,
+        shopifyFileId: String, // NEW — Shopify Files GID, for cascade deletes
       },
     ],
     metafields: [

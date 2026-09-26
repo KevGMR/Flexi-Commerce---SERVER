@@ -13,7 +13,8 @@ const cookieParser = require("cookie-parser");
 
 
 require("dotenv").config();
-
+const productImagesRouter = require("./controllers/ProductImages");
+const optionPresetsRouter = require("./controllers/OptionPresets");
 const userRouter = require("./controllers/User");
 const emailVerificationRouter = require("./controllers/EmailVerification");
 const organizationRouter = require("./controllers/Organization");
@@ -113,6 +114,12 @@ mongoose
     process.exit(1);
   });
 
+
+app.use("/products/images", verifyToken, checkUserStatus, productImagesRouter);
+app.use("/products", verifyToken, checkUserStatus, productRouter);
+
+
+
 // Health Check Endpoint (Public)
 app.get("/health", (req, res) => {
   res.status(200).json({
@@ -170,6 +177,9 @@ app.use("/transactions", verifyToken, checkUserStatus, transactionValidationRout
 app.use("/commissions", verifyToken, checkUserStatus, commissionRouter);
 
 app.use("/customers", verifyToken, checkUserStatus, customerRouter);
+
+
+app.use("/option-presets", verifyToken, checkUserStatus, optionPresetsRouter);
 
 // Admin - Backdate (Requires BACKDATE_SALES permission)
 app.use(

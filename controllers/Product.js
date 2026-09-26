@@ -701,6 +701,8 @@ router.put("/:id", verifyToken, async (req, res) => {
       productType,
       variants: incomingVariants,
       inventory: incomingInventory,
+      // new body field
+      clearVariantImages,  // boolean — if true, cascade-clear variants referencing removed images
     } = req.body;
 
     const product = await Product.findOne({
@@ -838,6 +840,54 @@ router.put("/:id", verifyToken, async (req, res) => {
       product.laborCost = 0;
       product.productCost = 0;
     }
+
+      // ---- Variant image reference check ----
+      if (Array.isArray(images)) {
+        const existingUrls = new Set(
+          (product.images || []).map((i) => i.url).filter(Boolean),
+        );
+        const incomingUrls = new Set(
+          images.map((i) => i.url).filter(Boolean),
+        );
+        const removedUrls = [...existingUrls].filter((u) => !incomingUrls.has(u));
+
+        if (removedUrls.length > 0) {
+          // Find variants that reference any removed URL
+          const blockedVariants = await Variant.find({
+            organizationId,
+            productId: product._id,
+            "images.url": { $in: removedUrls },
+          })
+            .select("_id sku selectedOptions images")
+            .lean();
+
+          if (blockedVariants.length > 0 && !clearVariantImages) {
+            return res.status(409).json({
+              error: "One or more images are still assigned to variants.",
+              code: "IMAGE_REFERENCED_BY_VARIANT",
+              blockedVariants: blockedVariants.map((v) => ({
+                _id: v._id,
+                sku: v.sku,
+                selectedOptions: v.selectedOptions || [],
+              })),
+              removedUrls,
+            });
+          }
+
+          if (blockedVariants.length > 0 && clearVariantImages) {
+            // Cascade: remove the matching image entries from those variants
+            for (const v of blockedVariants) {
+              const kept = (v.images || []).filter(
+                (img) => !removedUrls.includes(img.url),
+              );
+              await Variant.updateOne(
+                { _id: v._id },
+                { $set: { images: kept } },
+              );
+            }
+          }
+        }
+      }
 
     await product.save();
 

@@ -69,7 +69,8 @@ const tokenAuditLogSchema = new Schema(
         "invitation_resent",
         "user_permissions_synced",
         "backdate_applied",
-        "backdate_rolled_back"
+        "backdate_rolled_back",
+        "image_uploaded"
       ],
     },
     permission: {

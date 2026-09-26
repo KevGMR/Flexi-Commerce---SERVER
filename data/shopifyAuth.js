@@ -1,24 +1,19 @@
 const axios = require("axios");
-const ShopifySyncLog = require('../models/ShopifySyncLog');
+const ShopifySyncLog = require("../models/ShopifySyncLog");
 
 // Per-organization token cache: Map<organizationId, {token, expiresAt}>
 const tokenCache = new Map();
 
+const ENV_CACHE_KEY = "__env__";
+
 /**
  * Get Shopify access token using client credentials grant (OAuth 2.0)
- * Tokens are cached per organization with 60-second expiry buffer
- * 
- * @param {string} storeUrl - Shopify store URL (e.g., "mystore.myshopify.com")
- * @param {string} clientId - Shopify app client ID
- * @param {string} clientSecret - Shopify app client secret
- * @param {string} organizationId - Organization ID for caching and logging
- * @returns {Promise<{accessToken: string, expiresAt: Date}>}
+ * Tokens are cached per organization (or per "__env__") with 60s buffer.
  */
 async function getAccessToken(storeUrl, clientId, clientSecret, organizationId) {
   const now = Date.now();
-  const orgId = organizationId.toString();
+  const orgId = String(organizationId);
 
-  // Check cache first (with 60-second buffer)
   const cached = tokenCache.get(orgId);
   if (cached && now < cached.expiresAt - 60_000) {
     return {
@@ -42,50 +37,78 @@ async function getAccessToken(storeUrl, clientId, clientSecret, organizationId) 
 
     const expiresAt = now + data.expires_in * 1000;
 
-    // Update cache
     tokenCache.set(orgId, {
       token: data.access_token,
       expiresAt,
     });
 
-    // Log successful token refresh
-    await ShopifySyncLog.create({
-      organizationId,
-      syncType: 'token_refresh',
-      status: 'success',
-      requestPayload: { storeUrl, clientId: clientId.substring(0, 8) + '***' },
-      responsePayload: { expiresIn: data.expires_in, scope: data.scope },
-      duration: Date.now() - now,
-    }).catch(err => console.error('Failed to log token refresh:', err));
+    // Only log org-scoped refreshes — env refreshes are not tied to a Mongo org
+    if (orgId !== ENV_CACHE_KEY) {
+      await ShopifySyncLog.create({
+        organizationId,
+        syncType: "token_refresh",
+        status: "success",
+        requestPayload: { storeUrl, clientId: clientId.substring(0, 8) + "***" },
+        responsePayload: { expiresIn: data.expires_in, scope: data.scope },
+        duration: Date.now() - now,
+      }).catch((err) => console.error("Failed to log token refresh:", err));
+    }
 
-    console.log(`[Shopify Auth] Token refreshed for org ${orgId}, expires in ${data.expires_in}s`);
+    console.log(
+      `[Shopify Auth] Token refreshed for ${orgId === ENV_CACHE_KEY ? "env store" : "org " + orgId}, expires in ${data.expires_in}s`,
+    );
 
     return {
       accessToken: data.access_token,
       expiresAt: new Date(expiresAt),
     };
   } catch (error) {
-    console.error(`[Shopify Auth] Token refresh failed for org ${orgId}:`, error.message);
-    
-    // Log failure
-    await ShopifySyncLog.create({
-      organizationId,
-      syncType: 'token_refresh',
-      status: 'failed',
-      requestPayload: { storeUrl, clientId: clientId.substring(0, 8) + '***' },
-      responsePayload: { error: error.message },
-      duration: Date.now() - now,
-    }).catch(err => console.error('Failed to log token refresh error:', err));
+    console.error(
+      `[Shopify Auth] Token refresh failed for ${orgId === ENV_CACHE_KEY ? "env store" : "org " + orgId}:`,
+      error.message,
+    );
+
+    if (orgId !== ENV_CACHE_KEY) {
+      await ShopifySyncLog.create({
+        organizationId,
+        syncType: "token_refresh",
+        status: "failed",
+        requestPayload: { storeUrl, clientId: clientId.substring(0, 8) + "***" },
+        responsePayload: { error: error.message },
+        duration: Date.now() - now,
+      }).catch((err) => console.error("Failed to log token refresh error:", err));
+    }
 
     throw error;
   }
 }
 
 /**
- * Clear cached token for an organization (useful when disconnecting)
+ * Get a token for the env-configured store.
+ * Uses DOMAIN + SHOPIFY_CLIENT_ID + SHOPIFY_CLIENT_SECRET from .env.
+ * Cached under a fixed key so it's refreshed once per process lifetime.
  */
-function clearTokenCache(organizationId) {
-  tokenCache.delete(organizationId.toString());
+async function getEnvAccessToken() {
+  const storeUrl = process.env.DOMAIN;
+  const clientId = process.env.SHOPIFY_CLIENT_ID;
+  const clientSecret = process.env.SHOPIFY_CLIENT_SECRET;
+
+  if (!storeUrl || !clientId || !clientSecret) {
+    const err = new Error(
+      "Env Shopify credentials missing: DOMAIN, SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET required",
+    );
+    err.code = "ENV_SHOPIFY_CREDENTIALS_MISSING";
+    throw err;
+  }
+
+  return getAccessToken(storeUrl, clientId, clientSecret, ENV_CACHE_KEY);
 }
 
-module.exports = { getAccessToken, clearTokenCache };
+/**
+ * Clear cached token for an organization (or the env store).
+ */
+function clearTokenCache(organizationId) {
+  tokenCache.delete(String(organizationId));
+}
+
+module.exports = { getAccessToken, getEnvAccessToken, clearTokenCache, ENV_CACHE_KEY };
