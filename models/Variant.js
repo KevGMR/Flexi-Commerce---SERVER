@@ -77,6 +77,7 @@ variantSchema.index(
     partialFilterExpression: { shopifyNumericId: { $type: "number" } },
   }
 );
+variantSchema.index({ updatedAt: 1 });
 
 const Variant = mongoose.model("Variant", variantSchema);
 module.exports = Variant;

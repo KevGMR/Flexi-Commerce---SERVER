@@ -32,6 +32,17 @@ const saleSchema = new mongoose.Schema(
       sparse: true,
       index: true,
     },
+    salesChannel: {
+      type: String,
+      enum: ["pos", "storefront"],
+      default: "pos",
+      index: true,
+    },
+    checkoutRequestId: {
+      type: String,
+      sparse: true,
+      index: true,
+    },
 
     // NEW: Sale-level default assigned user for commission
     assignedUser: {
@@ -384,7 +395,7 @@ const saleSchema = new mongoose.Schema(
     cashierId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
-      required: true,
+      required: false,
       index: true,
     },
     supervisorId: mongoose.Schema.Types.ObjectId, // Who approved overrides
@@ -451,7 +462,10 @@ saleSchema.index({ shiftSessionId: 1, validationStatus: 1 }); // Shift transacti
 // Note: deliveryFeeId already has index via field-level definition
 saleSchema.index(
   { organizationId: 1, idempotencyKey: 1 },
-  { unique: true, sparse: true },
+  {
+    unique: true,
+    partialFilterExpression: { idempotencyKey: { $type: "string" } },
+  },
 );
 
 // Delivery category reporting indexes (NEW)
@@ -473,5 +487,6 @@ saleSchema.index({
 // Additional index for assignedUser
 saleSchema.index({ assignedUser: 1, createdAt: -1 });
 saleSchema.index({ "items.variantId": 1, createdAt: -1 }); // Flexi variant sales lookup
+saleSchema.index({ organizationId: 1, salesChannel: 1, createdAt: -1 });
 
 module.exports = mongoose.model("Sale", saleSchema);

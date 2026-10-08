@@ -155,6 +155,7 @@ productSchema.index(
   { organizationId: 1, handle: 1 },
   { unique: true, sparse: true }
 );
+productSchema.index({ updatedAt: 1 });
 
 const Product = mongoose.model("Product", productSchema);
 module.exports = Product;

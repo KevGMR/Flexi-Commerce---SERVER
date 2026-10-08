@@ -1,0 +1,474 @@
+const express = require("express");
+const mongoose = require("mongoose");
+const router = express.Router();
+
+const Product = require("../models/Product");
+const Collection = require("../models/Collection");
+const Variant = require("../models/Variant");
+const Inventory = require("../models/Inventory");
+const Location = require("../models/Location");
+const Organization = require("../models/Organization");
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve which location the storefront should price/stock against.
+ * Priority: ?locationId= query → default Location for the org → first active.
+ */
+async function resolveLocationId(req, org) {
+  const fromQuery = req.query.locationId;
+  if (fromQuery && mongoose.Types.ObjectId.isValid(fromQuery)) {
+    return fromQuery;
+  }
+
+  const defaultLoc = await Location.findOne({
+    organizationId: org._id,
+    isDefault: true,
+    status: "active",
+  })
+    .select("_id")
+    .lean();
+
+  if (defaultLoc) return defaultLoc._id;
+
+  const firstActive = await Location.findOne({
+    organizationId: org._id,
+    status: "active",
+  })
+    .select("_id")
+    .lean();
+
+  return firstActive?._id || null;
+}
+
+/**
+ * Shape a product for public consumption. Strips internal fields and
+ * attaches per-variant availability from the resolved location.
+ */
+function publicProduct(p, variantAvailability) {
+  const variants = (p.variants || []).map((v) => ({
+    id: v._id,
+    sku: v.sku,
+    title: (v.selectedOptions || []).map((o) => o.value).join(" / "),
+    price: v.price,
+    compareAtPrice: v.compareAtPrice,
+    available: variantAvailability?.[String(v._id)] ?? null,
+    image: v.images?.[0]?.url || null,
+  }));
+
+  return {
+    id: p._id,
+    name: p.name,
+    handle: p.handle,
+    description: p.description,
+    productType: p.productType,
+    vendor: p.vendor,
+    tags: p.tags || [],
+    price: p.price,
+    compareAtPrice: p.compareAtPrice,
+    images: (p.images || []).map((img) => ({
+      url: img.url,
+      alt: img.alt,
+    })),
+    defaultImage:
+      (p.images || []).find((i) => i.isDefault)?.url ||
+      (p.images || [])[0]?.url ||
+      null,
+    variants,
+    options: p.options || [],
+    seoTitle: p.seoTitle,
+    seoDescription: p.seoDescription,
+    publishedAt: p.publishedAt,
+  };
+}
+
+/**
+ * Load availability map for a set of products.
+ * - Variants with trackInventory === false: available = null (unlimited)
+ * - Variants with trackInventory !== false: available = Inventory.available ?? 0
+ */
+async function loadAvailability(productIds, locationId, organizationId) {
+  if (!locationId || productIds.length === 0) return {};
+
+  const variants = await Variant.find({
+    productId: { $in: productIds },
+    organizationId,
+    status: "active",
+  })
+    .select("_id trackInventory")
+    .lean();
+
+  if (variants.length === 0) return {};
+
+  const map = {};
+
+  const trackedVariantIds = [];
+  for (const v of variants) {
+    if (v.trackInventory === false) {
+      map[String(v._id)] = null;
+    } else {
+      trackedVariantIds.push(v._id);
+    }
+  }
+
+  if (trackedVariantIds.length === 0) return map;
+
+  const inventories = await Inventory.find({
+    variantId: { $in: trackedVariantIds },
+    locationId,
+    organizationId,
+  })
+    .select("variantId available")
+    .lean();
+
+  for (const inv of inventories) {
+    map[String(inv.variantId)] = inv.available ?? 0;
+  }
+
+  for (const id of trackedVariantIds) {
+    const key = String(id);
+    if (!(key in map)) map[key] = 0;
+  }
+
+  return map;
+}
+
+/**
+ * Batch-load variants for a set of products, grouped by productId.
+ */
+async function loadVariantsByProduct(productIds, organizationId) {
+  if (productIds.length === 0) return {};
+
+  const variants = await Variant.find({
+    productId: { $in: productIds },
+    organizationId,
+    status: "active",
+  })
+    .sort({ position: 1 })
+    .lean();
+
+  const grouped = {};
+  for (const v of variants) {
+    const key = String(v.productId);
+    if (!grouped[key]) grouped[key] = [];
+    grouped[key].push(v);
+  }
+  return grouped;
+}
+
+// ---------------------------------------------------------------------------
+// GET /storefront/orgs/by-host?host=...
+// Used by the Next.js proxy to resolve a hostname to an org slug.
+// (No API key check on this one — it's called from Next.js middleware
+//  before we know which org, and it reveals only the slug mapping.)
+// ---------------------------------------------------------------------------
+
+router.get("/orgs/by-host", async (req, res) => {
+  try {
+    const { host } = req.query;
+    if (!host) {
+      return res.status(400).json({ error: "host query param required" });
+    }
+
+    const cleanHost = String(host).toLowerCase().split(":")[0];
+
+    // 1. Exact match on custom domain
+    let org = await Organization.findOne({
+      "website.domain": cleanHost,
+      "website.domainVerified": true,
+      status: "active",
+    })
+      .select("slug")
+      .lean();
+
+    // 2. Fall back to subdomain match
+    if (!org) {
+      const subdomain = cleanHost.split(".")[0];
+      org = await Organization.findOne({
+        "website.subdomain": subdomain,
+        status: "active",
+      })
+        .select("slug")
+        .lean();
+    }
+
+    if (!org) {
+      return res.status(404).json({ error: "No org for host" });
+    }
+
+    return res.status(200).json({ slug: org.slug });
+  } catch (error) {
+    console.error("[Storefront] by-host error:", error);
+    return res.status(500).json({ error: "Failed to resolve host" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /storefront/products
+// Query: search, collectionId, limit, skip, locationId
+// ---------------------------------------------------------------------------
+
+router.get("/products", async (req, res) => {
+  try {
+    const org = req.storefrontOrg;
+    const organizationId = org._id;
+    const { search = "", collectionId, limit = 24, skip = 0 } = req.query;
+
+    const locationId = await resolveLocationId(req, org);
+
+    const query = {
+      organizationId,
+      status: "active",
+      // published: true,
+    };
+
+    console.log({query})
+
+    if (search.trim()) {
+      const q = search.trim();
+      query.$or = [
+        { name: new RegExp(q, "i") },
+        { sku: new RegExp(q, "i") },
+        { tags: new RegExp(q, "i") },
+        { vendor: new RegExp(q, "i") },
+      ];
+    }
+
+    if (collectionId && mongoose.Types.ObjectId.isValid(collectionId)) {
+      const collection = await Collection.findOne({
+        _id: collectionId,
+        organizationId,
+        status: "active",
+        published: true,
+      })
+        .select("productIds")
+        .lean();
+
+      if (!collection) {
+        return res.status(200).json({
+          products: [],
+          total: 0,
+          skip: 0,
+          limit: 24,
+          locationId,
+        });
+      }
+      query._id = { $in: collection.productIds };
+    }
+
+    const limitNum = Math.min(Math.max(1, parseInt(limit) || 24), 100);
+    const skipNum = Math.max(0, parseInt(skip) || 0);
+
+    const [products, total] = await Promise.all([
+      Product.find(query)
+        .sort({ createdAt: -1 })
+        .skip(skipNum)
+        .limit(limitNum)
+        .lean(),
+      Product.countDocuments(query),
+    ]);
+
+    const productIds = products.map((p) => p._id);
+    const [availability, variantsByProduct] = await Promise.all([
+      loadAvailability(productIds, locationId, organizationId),
+      loadVariantsByProduct(productIds, organizationId),
+    ]);
+
+    const payload = products.map((p) =>
+      publicProduct(
+        { ...p, variants: variantsByProduct[String(p._id)] || [] },
+        availability,
+      ),
+    );
+
+    return res.status(200).json({
+      products: payload,
+      total,
+      skip: skipNum,
+      limit: limitNum,
+      locationId,
+    });
+  } catch (error) {
+    console.error("[Storefront] products error:", error);
+    return res.status(500).json({ error: "Failed to fetch products" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /storefront/products/:handle
+// ---------------------------------------------------------------------------
+
+router.get("/products/:handle", async (req, res) => {
+  try {
+    const org = req.storefrontOrg;
+    const organizationId = org._id;
+    const { handle } = req.params;
+
+    const locationId = await resolveLocationId(req, org);
+
+    const product = await Product.findOne({
+      organizationId,
+      handle,
+      status: "active",
+      published: true,
+    }).lean();
+
+    if (!product) {
+      return res.status(404).json({ error: "Product not found" });
+    }
+
+    const [variants, availability] = await Promise.all([
+      Variant.find({ productId: product._id, organizationId, status: "active" })
+        .sort({ position: 1 })
+        .lean(),
+      loadAvailability([product._id], locationId, organizationId),
+    ]);
+
+    const payload = publicProduct({ ...product, variants }, availability);
+
+    return res.status(200).json({ product: payload, locationId });
+  } catch (error) {
+    console.error("[Storefront] product detail error:", error);
+    return res.status(500).json({ error: "Failed to fetch product" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /storefront/collections
+// ---------------------------------------------------------------------------
+
+router.get("/collections", async (req, res) => {
+  try {
+    const org = req.storefrontOrg;
+    const organizationId = org._id;
+
+    const collections = await Collection.find({
+      organizationId,
+      status: "active",
+      published: true,
+    })
+      .select(
+        "_id name slug description image parentCollectionId type productCount",
+      )
+      .sort({ name: 1 })
+      .lean();
+
+    return res.status(200).json({ collections });
+  } catch (error) {
+    console.error("[Storefront] collections error:", error);
+    return res.status(500).json({ error: "Failed to fetch collections" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /storefront/collections/:slug
+// Returns collection metadata + paginated products.
+// ---------------------------------------------------------------------------
+
+router.get("/collections/:slug", async (req, res) => {
+  try {
+    const org = req.storefrontOrg;
+    const organizationId = org._id;
+    const { slug } = req.params;
+    const { search = "", limit = 24, skip = 0 } = req.query;
+
+    const locationId = await resolveLocationId(req, org);
+
+    const collection = await Collection.findOne({
+      organizationId,
+      slug,
+      status: "active",
+      published: true,
+    }).lean();
+
+    if (!collection) {
+      return res.status(404).json({ error: "Collection not found" });
+    }
+
+    const query = {
+      organizationId,
+      status: "active",
+      published: true,
+      _id: { $in: collection.productIds || [] },
+    };
+
+    if (search.trim()) {
+      const q = search.trim();
+      query.$or = [
+        { name: new RegExp(q, "i") },
+        { sku: new RegExp(q, "i") },
+      ];
+    }
+
+    const limitNum = Math.min(Math.max(1, parseInt(limit) || 24), 100);
+    const skipNum = Math.max(0, parseInt(skip) || 0);
+
+    const [products, total] = await Promise.all([
+      Product.find(query)
+        .sort({ name: 1 })
+        .skip(skipNum)
+        .limit(limitNum)
+        .lean(),
+      Product.countDocuments(query),
+    ]);
+
+    const productIds = products.map((p) => p._id);
+    const [availability, variantsByProduct] = await Promise.all([
+      loadAvailability(productIds, locationId, organizationId),
+      loadVariantsByProduct(productIds, organizationId),
+    ]);
+
+    const payload = products.map((p) =>
+      publicProduct(
+        { ...p, variants: variantsByProduct[String(p._id)] || [] },
+        availability,
+      ),
+    );
+
+    return res.status(200).json({
+      collection: {
+        id: collection._id,
+        name: collection.name,
+        slug: collection.slug,
+        description: collection.description,
+        image: collection.image,
+        productCount: collection.productCount,
+      },
+      products: payload,
+      total,
+      skip: skipNum,
+      limit: limitNum,
+      locationId,
+    });
+  } catch (error) {
+    console.error("[Storefront] collection detail error:", error);
+    return res.status(500).json({ error: "Failed to fetch collection" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Organization lookup by slug (used by storefront server components to
+// fetch org settings like name, currency, theme)
+// ---------------------------------------------------------------------------
+
+router.get("/org", async (req, res) => {
+  try {
+    const org = req.storefrontOrg;
+    return res.status(200).json({
+      organization: {
+        id: org._id,
+        name: org.name,
+        slug: org.slug,
+        settings: org.settings,
+        website: org.website,
+      },
+    });
+  } catch (error) {
+    console.error("[Storefront] org error:", error);
+    return res.status(500).json({ error: "Failed to fetch organization" });
+  }
+});
+
+module.exports = router;

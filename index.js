@@ -45,19 +45,31 @@ const expenseRouter = require("./controllers/Expense");
 const shiftSessionRouter = require("./controllers/ShiftSession");
 const reconciliationRouter = require("./controllers/Reconciliation");
 const transactionValidationRouter = require("./controllers/TransactionValidation");
+const collectionRecomputeWorker = require("./workers/collectionRecomputeWorker");
 
 const { verifyToken } = require("./middleware/auth");
 const { checkUserStatus } = require("./middleware/userStatusCheck");
 const { requirePermission } = require("./middleware/permissionCheck");
-const { apiLimiter } = require("./middleware/rateLimiter");
+const { apiLimiter, storefrontLimiter } = require("./middleware/rateLimiter");
 const { handleErrors } = require("./middleware/auth");
 const { PERMISSIONS } = require("./config/permissions");
 const shopifyRetryWorker = require("./workers/shopifyRetryWorker");
 const { startDeliveryStatusSync } = require("./workers/syncDeliveryStatus");
 const { startLinkOfflineDeliveriesToSales } = require("./workers/linkOfflineDeliveriesToSales");
 
+// ---------------------------------------------------------------------------
+// Storefront Public Routes (org resolved from X-Organization-Slug header)
+// ---------------------------------------------------------------------------
+const storefrontRouter = require("./controllers/Storefront");
+const { orgFromHost } = require("./middleware/orgFromHost");
+
+const storefrontCheckoutRouter = require("./controllers/StorefrontCheckout");
+const storefrontMpesaRouter = require("./controllers/StorefrontMpesa");
+
+
 const app = express();
 const port = process.env.PORT || 9200;
+app.set("trust proxy", 1);
 
 // Security & Performance Middleware
 app.use(helmet()); // Security headers
@@ -102,11 +114,21 @@ mongoose
       console.log(`MongoDB connection is active 👌`);
       console.log(`Server active on port ${port}`);
       console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
+
+      // Fail fast if encryption is misconfigured
+      try {
+        require("./services/secretBox").selfTest();
+        console.log("SecretBox self-test passed ✅");
+      } catch (err) {
+        console.error("[startup] SecretBox self-test failed:", err.message);
+        process.exit(1);
+      }
       
       // Start background workers
       shopifyRetryWorker.start();
       startDeliveryStatusSync();
       startLinkOfflineDeliveriesToSales();
+      collectionRecomputeWorker.start();
     });
   })
   .catch((err) => {
@@ -188,6 +210,23 @@ app.use(
   checkUserStatus,
   requirePermission(PERMISSIONS.BACKDATE_SALES),
   backdateRouter
+);
+
+// Public M-Pesa callback — no orgFromHost, no storefront key.
+// Safaricom resolves the org from CheckoutRequestID in the payload.
+// Mounted BEFORE the /storefront router so it takes precedence.
+app.use("/storefront/mpesa", storefrontMpesaRouter);
+
+// ---------------------------------------------------------------------------
+// Storefront Public Routes
+// Trusted caller (X-Storefront-Key) + org resolved from X-Organization-Slug
+// ---------------------------------------------------------------------------
+app.use(
+  "/storefront",
+  storefrontLimiter,
+  orgFromHost,
+  storefrontRouter,
+  storefrontCheckoutRouter,
 );
 
 // 404 Handler

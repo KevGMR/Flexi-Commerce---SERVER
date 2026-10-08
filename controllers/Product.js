@@ -9,6 +9,10 @@ const Location = require("../models/Location");
 
 const { verifyToken } = require("../middleware/auth");
 const { logTokenEvent } = require("../services/auditLogger");
+const {
+  syncProductCollections,
+  recomputeAutomaticCollections,
+} = require("../services/collectionSync");
 
 // ---------------------------------------------------------------
 // helpers (existing)
@@ -125,6 +129,7 @@ async function persistVariants(organizationId, productId, incomingVariants) {
       barcode: v.barcode,
       position: v.position !== undefined ? Number(v.position) : i,
       trackInventory: v.trackInventory !== false,
+      continueSellingWhenOutOfStock: v.continueSellingWhenOutOfStock === true,
       status: v.status === "archived" ? "archived" : "active",
       images: Array.isArray(v.images) ? v.images : [],
       metafields: Array.isArray(v.metafields) ? v.metafields : [],
@@ -205,10 +210,6 @@ async function persistInventory(organizationId, keyToRealId, incomingInventory) 
 // POS catalog — MUST be before /:id
 // ---------------------------------------------------------------
 
-/**
- * GET /products/pos-catalog?locationId=xxx&search=&skip=0&limit=100
- * Flattened catalogue for the POS: one row per variant, stock resolved for one location.
- */
 router.get("/pos-catalog", verifyToken, async (req, res) => {
   try {
     const organizationId = req.user.organizationId;
@@ -225,7 +226,6 @@ router.get("/pos-catalog", verifyToken, async (req, res) => {
       return res.status(404).json({ error: "Location not found" });
     }
 
-    // POS sees everything except archived
     const query = {
       organizationId,
       status: { $in: ["active", "draft", "unlisted"] },
@@ -277,6 +277,8 @@ router.get("/pos-catalog", verifyToken, async (req, res) => {
         compareAtPrice: v.compareAtPrice ?? null,
         selectedOptions: v.selectedOptions || [],
         trackInventory: v.trackInventory !== false,
+        continueSellingWhenOutOfStock: v.continueSellingWhenOutOfStock === true,
+        images: v.images || [],
         availableAtLocation: inv ? inv.available : null,
         onHandAtLocation: inv ? inv.onHand : null,
       });
@@ -345,13 +347,13 @@ router.post("/", verifyToken, async (req, res) => {
       status,
       variants: incomingVariants,
       inventory: incomingInventory,
+      collectionIds,
     } = req.body;
 
     if (!name) {
       return res.status(400).json({ error: "name is required" });
     }
 
-    // service / bundle validation (unchanged)
     if (type === "service" && serviceKind === "bundle") {
       const hasLegacy =
         Array.isArray(serviceBundleComponents) && serviceBundleComponents.length > 0;
@@ -371,18 +373,15 @@ router.post("/", verifyToken, async (req, res) => {
       }
     }
 
-    // SKU — synthesize if missing
     let finalSku = (sku && String(sku).trim()) || generateProductSku();
     let existingSku = await Product.findOne({ organizationId, sku: finalSku });
     if (existingSku) {
       if (sku) {
         return res.status(409).json({ error: "SKU already exists" });
       }
-      // synthesized collision — retry once
       finalSku = generateProductSku();
     }
 
-    // price — required by schema; fall back to min variant price
     let finalPrice;
     if (price !== undefined && price !== null) {
       finalPrice = Number(price);
@@ -395,7 +394,6 @@ router.post("/", verifyToken, async (req, res) => {
       finalPrice = 0;
     }
 
-    // service cost logic (unchanged)
     let finalLabor = 0;
     let finalProduct = 0;
     let finalCommissionType = "percentage";
@@ -453,7 +451,6 @@ router.post("/", verifyToken, async (req, res) => {
       }
     }
 
-    // handle
     const finalHandle = handle
       ? await ensureUniqueHandle(organizationId, handle)
       : await ensureUniqueHandle(organizationId, name);
@@ -478,7 +475,6 @@ router.post("/", verifyToken, async (req, res) => {
       images: Array.isArray(images) ? images : [],
       vendor,
 
-      // new fields
       options: Array.isArray(options) ? options : [],
       metafields: Array.isArray(metafields) ? metafields : [],
       handle: finalHandle,
@@ -495,11 +491,38 @@ router.post("/", verifyToken, async (req, res) => {
       commissionValue: finalCommissionValue,
       laborCost: finalLabor,
       productCost: finalProduct,
+
+      collectionIds: Array.isArray(collectionIds) ? collectionIds : [],
     });
 
     await product.save();
 
-    // inline variants + inventory
+    // ---- Collection two-way sync (manual collections) ----
+    if (Array.isArray(collectionIds) && collectionIds.length > 0) {
+      try {
+        await syncProductCollections({
+          organizationId,
+          productId: product._id,
+          oldCollectionIds: [],
+          newCollectionIds: collectionIds,
+        });
+      } catch (err) {
+        console.error("[Product] collection sync failed:", err.message);
+      }
+    }
+
+    // ---- Automatic collection recompute ----
+    try {
+      await recomputeAutomaticCollections({
+        organizationId,
+        productIds: [product._id],
+        forceFullSweep: true,
+      });
+    } catch (err) {
+      console.error("[Product] auto-collection recompute failed:", err.message);
+    }
+
+    // ---- Variants + inventory ----
     let savedVariants = [];
     let savedInventory = [];
 
@@ -521,6 +544,17 @@ router.post("/", verifyToken, async (req, res) => {
           keyToRealId,
           incomingInventory
         );
+      }
+
+      // Variant changes can affect variant-scoped and location-aware automatic collections
+      try {
+        await recomputeAutomaticCollections({
+          organizationId,
+          productIds: [product._id],
+          forceFullSweep: true,
+        });
+      } catch (err) {
+        console.error("[Product] variant-triggered recompute failed:", err.message);
       }
     }
 
@@ -621,7 +655,7 @@ router.get("/", verifyToken, async (req, res) => {
 });
 
 // ---------------------------------------------------------------
-// GET /products/:id — product + variants + inventory + locations
+// GET /products/:id
 // ---------------------------------------------------------------
 
 router.get("/:id", verifyToken, async (req, res) => {
@@ -701,8 +735,8 @@ router.put("/:id", verifyToken, async (req, res) => {
       productType,
       variants: incomingVariants,
       inventory: incomingInventory,
-      // new body field
-      clearVariantImages,  // boolean — if true, cascade-clear variants referencing removed images
+      clearVariantImages,
+      collectionIds,
     } = req.body;
 
     const product = await Product.findOne({
@@ -712,6 +746,9 @@ router.put("/:id", verifyToken, async (req, res) => {
     if (!product) {
       return res.status(404).json({ error: "Product not found" });
     }
+
+    // Capture old collectionIds before mutation
+    const oldCollectionIds = (product.collectionIds || []).map(String);
 
     if (sku && sku !== product.sku) {
       const existingSku = await Product.findOne({ organizationId, sku });
@@ -752,7 +789,6 @@ router.put("/:id", verifyToken, async (req, res) => {
     if (vendor) product.vendor = vendor;
     if (status) product.status = status;
 
-    // new
     if (options !== undefined) {
       product.options = Array.isArray(options) ? options : [];
     }
@@ -767,8 +803,10 @@ router.put("/:id", verifyToken, async (req, res) => {
         product._id
       );
     }
+    if (collectionIds !== undefined) {
+      product.collectionIds = Array.isArray(collectionIds) ? collectionIds : [];
+    }
 
-    // service cost logic (unchanged)
     if (product.type === "service") {
       product.trackInventory = false;
       if (!product.serviceKind) product.serviceKind = "single";
@@ -841,57 +879,86 @@ router.put("/:id", verifyToken, async (req, res) => {
       product.productCost = 0;
     }
 
-      // ---- Variant image reference check ----
-      if (Array.isArray(images)) {
-        const existingUrls = new Set(
-          (product.images || []).map((i) => i.url).filter(Boolean),
-        );
-        const incomingUrls = new Set(
-          images.map((i) => i.url).filter(Boolean),
-        );
-        const removedUrls = [...existingUrls].filter((u) => !incomingUrls.has(u));
+    // ---- Variant image reference check ----
+    if (Array.isArray(images)) {
+      const existingUrls = new Set(
+        (product.images || []).map((i) => i.url).filter(Boolean),
+      );
+      const incomingUrls = new Set(
+        images.map((i) => i.url).filter(Boolean),
+      );
+      const removedUrls = [...existingUrls].filter((u) => !incomingUrls.has(u));
 
-        if (removedUrls.length > 0) {
-          // Find variants that reference any removed URL
-          const blockedVariants = await Variant.find({
-            organizationId,
-            productId: product._id,
-            "images.url": { $in: removedUrls },
-          })
-            .select("_id sku selectedOptions images")
-            .lean();
+      if (removedUrls.length > 0) {
+        const blockedVariants = await Variant.find({
+          organizationId,
+          productId: product._id,
+          "images.url": { $in: removedUrls },
+        })
+          .select("_id sku selectedOptions images")
+          .lean();
 
-          if (blockedVariants.length > 0 && !clearVariantImages) {
-            return res.status(409).json({
-              error: "One or more images are still assigned to variants.",
-              code: "IMAGE_REFERENCED_BY_VARIANT",
-              blockedVariants: blockedVariants.map((v) => ({
-                _id: v._id,
-                sku: v.sku,
-                selectedOptions: v.selectedOptions || [],
-              })),
-              removedUrls,
-            });
-          }
+        if (blockedVariants.length > 0 && !clearVariantImages) {
+          return res.status(409).json({
+            error: "One or more images are still assigned to variants.",
+            code: "IMAGE_REFERENCED_BY_VARIANT",
+            blockedVariants: blockedVariants.map((v) => ({
+              _id: v._id,
+              sku: v.sku,
+              selectedOptions: v.selectedOptions || [],
+            })),
+            removedUrls,
+          });
+        }
 
-          if (blockedVariants.length > 0 && clearVariantImages) {
-            // Cascade: remove the matching image entries from those variants
-            for (const v of blockedVariants) {
-              const kept = (v.images || []).filter(
-                (img) => !removedUrls.includes(img.url),
-              );
-              await Variant.updateOne(
-                { _id: v._id },
-                { $set: { images: kept } },
-              );
-            }
+        if (blockedVariants.length > 0 && clearVariantImages) {
+          for (const v of blockedVariants) {
+            const kept = (v.images || []).filter(
+              (img) => !removedUrls.includes(img.url),
+            );
+            await Variant.updateOne(
+              { _id: v._id },
+              { $set: { images: kept } },
+            );
           }
         }
       }
+    }
 
     await product.save();
 
-    // inline variants + inventory
+    // ---- Collection two-way sync ----
+    const newCollectionIds = (product.collectionIds || []).map(String);
+    const membershipChanged =
+      oldCollectionIds.length !== newCollectionIds.length ||
+      oldCollectionIds.some((id) => !newCollectionIds.includes(id)) ||
+      newCollectionIds.some((id) => !oldCollectionIds.includes(id));
+
+    if (membershipChanged) {
+      try {
+        await syncProductCollections({
+          organizationId,
+          productId: product._id,
+          oldCollectionIds,
+          newCollectionIds,
+        });
+      } catch (err) {
+        console.error("[Product] collection sync failed:", err.message);
+      }
+    }
+
+    // ---- Automatic collection recompute ----
+    try {
+      await recomputeAutomaticCollections({
+        organizationId,
+        productIds: [product._id],
+        forceFullSweep: true,
+      });
+    } catch (err) {
+      console.error("[Product] auto-collection recompute failed:", err.message);
+    }
+
+    // ---- Variants + inventory ----
     let savedVariants = [];
     let savedInventory = [];
 
@@ -902,7 +969,7 @@ router.put("/:id", verifyToken, async (req, res) => {
         incomingVariants
       );
 
-      // archive variants no longer present
+      // Archive variants no longer present
       const keptIds = savedVariants.map((s) => s.doc._id);
       await Variant.updateMany(
         {
@@ -925,6 +992,17 @@ router.put("/:id", verifyToken, async (req, res) => {
           keyToRealId,
           incomingInventory
         );
+      }
+
+      // Variant changes can affect variant-scoped and location-aware automatic collections
+      try {
+        await recomputeAutomaticCollections({
+          organizationId,
+          productIds: [product._id],
+          forceFullSweep: true,
+        });
+      } catch (err) {
+        console.error("[Product] variant-triggered recompute failed:", err.message);
       }
     }
 

@@ -33,9 +33,9 @@ const inventorySchema = new Schema(
 
     // migration traceability
     importedAt: Date,
-    migratedFromQuantity: Number, // raw value from export (for audit)
+    migratedFromQuantity: Number,
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 inventorySchema.index(
@@ -44,6 +44,9 @@ inventorySchema.index(
 );
 inventorySchema.index({ organizationId: 1, locationId: 1 });
 inventorySchema.index({ organizationId: 1, variantId: 1 });
+// Worker change-detection queries
+inventorySchema.index({ updatedAt: 1 });
+
 
 const Inventory = mongoose.model("Inventory", inventorySchema);
 module.exports = Inventory;

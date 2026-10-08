@@ -42,6 +42,30 @@ const organizationSchema = new Schema(
       theme: String,
       published: { type: Boolean, default: false },
     },
+
+        // M-Pesa Daraja integration (per-org credentials)
+    // Secret fields are AES-256-GCM encrypted at rest via services/secretBox.
+    daraja: {
+      enabled: { type: Boolean, default: false },
+      environment: {
+        type: String,
+        enum: ["sandbox", "production"],
+        default: "sandbox",
+      },
+      consumerKey: String,      // encrypted
+      consumerSecret: String,   // encrypted
+      shortcode: String,        // Paybill or Till
+      passkey: String,          // encrypted
+      transactionType: {
+        type: String,
+        enum: ["CustomerPayBillOnline", "CustomerBuyGoodsOnline"],
+        default: "CustomerPayBillOnline",
+      },
+      // Random per-org secret appended to the callback URL as ?key=
+      // Used to verify that callbacks actually came from Safaricom.
+      callbackSecret: String,
+    },
+
     // Billing/plan
     plan: {
       type: String,
@@ -103,5 +127,6 @@ const organizationSchema = new Schema(
 organizationSchema.index({ slug: 1 }, { unique: true });
 organizationSchema.index({ ownerId: 1 });
 organizationSchema.index({ status: 1 });
+organizationSchema.index({ "daraja.enabled": 1 });
 
 module.exports = mongoose.model("Organization", organizationSchema);
