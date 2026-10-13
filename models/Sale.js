@@ -38,6 +38,10 @@ const saleSchema = new mongoose.Schema(
       default: "pos",
       index: true,
     },
+    storefrontUrl: {
+      type: String,
+      sparse: true,
+    },
     checkoutRequestId: {
       type: String,
       sparse: true,

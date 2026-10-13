@@ -37,13 +37,28 @@ const organizationSchema = new Schema(
       },
     },
     // Website builder placeholder
+
+    // Website / storefront
     website: {
-      domain: String,
-      theme: String,
+      domain: { type: String, lowercase: true, trim: true },
+      subdomain: { type: String, lowercase: true, trim: true },
+      domainVerified: { type: Boolean, default: false },
       published: { type: Boolean, default: false },
+
+      // Brand identity (used by the storefront)
+      logoUrl: String,
+      faviconUrl: String,
+      tagline: String,
+      primaryColor: { type: String, default: "#111111" },
+      accentColor: { type: String, default: "#2563eb" },
+      headerLayout: {
+        type: String,
+        enum: ["centered", "left"],
+        default: "left",
+      },
     },
 
-        // M-Pesa Daraja integration (per-org credentials)
+    // M-Pesa Daraja integration (per-org credentials)
     // Secret fields are AES-256-GCM encrypted at rest via services/secretBox.
     daraja: {
       enabled: { type: Boolean, default: false },

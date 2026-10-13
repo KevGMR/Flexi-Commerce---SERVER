@@ -5,8 +5,11 @@ const Sale = require("../models/Sale");
 const Organization = require("../models/Organization");
 const Inventory = require("../models/Inventory");
 const Variant = require("../models/Variant");
-const secretBox = require("../services/secretBox");
 const daraja = require("../services/daraja");
+const {
+  sendStorefrontOrderConfirmation,
+  sendStorefrontPaymentFailed,
+} = require("../services/emailNotifier");
 
 /**
  * POST /storefront/mpesa/callback
@@ -16,14 +19,12 @@ const daraja = require("../services/daraja");
  * send X-Storefront-Key or X-Organization-Slug. The org is resolved from
  * the CheckoutRequestID in the payload.
  *
- * MUST respond 200 quickly (Safaricom retries otherwise). All heavy work
- * should happen synchronously but fast; if we ever need async, queue it.
+ * MUST respond 200 quickly. Safaricom retries failed callbacks.
  */
 
 async function handleMpesaCallback(req, res) {
-  // Always respond 200 — even on error — or Safaricom retries the callback
-  // up to 3 times and may mark the transaction as failed.
-  const ack = () => res.status(200).json({ ResultCode: 0, ResultDesc: "Accepted" });
+  const ack = () =>
+    res.status(200).json({ ResultCode: 0, ResultDesc: "Accepted" });
 
   try {
     const parsed = daraja.parseStkCallback(req.body);
@@ -50,11 +51,10 @@ async function handleMpesaCallback(req, res) {
       return ack();
     }
 
-    // Verify the callback secret against the org's stored value.
-    // Safaricom lets us append arbitrary query params to the CallBackURL.
+    // Verify callback secret (Safaricom echoes it back via ?key=)
     const providedKey = req.query.key;
     const org = await Organization.findById(sale.organizationId)
-      .select("daraja.callbackSecret")
+      .select("name settings.currency daraja.callbackSecret")
       .lean();
 
     const expectedKey = org?.daraja?.callbackSecret;
@@ -63,12 +63,15 @@ async function handleMpesaCallback(req, res) {
         "[MpesaCallback] callback secret mismatch for sale",
         sale._id,
       );
-      return ack(); // Don't leak the discrepancy to the caller
+      return ack();
     }
 
     if (!parsed.ok) {
-      // Payment failed / cancelled / insufficient funds
+      // ---------- Payment failed ----------
       sale.paymentStatus = "failed";
+      sale.status = "voided";
+      sale.voidReason = `M-Pesa declined: ${parsed.resultDesc}`;
+      sale.voidedAt = new Date();
       sale.payments.push({
         method: "mpesa",
         amount: 0,
@@ -76,23 +79,36 @@ async function handleMpesaCallback(req, res) {
         reference: null,
         paidAt: new Date(),
       });
-      sale.notes = `${sale.notes || ""}\nM-Pesa failed: ${parsed.resultDesc}`.trim();
       await sale.save();
 
       console.log(
         `[MpesaCallback] sale ${sale._id} failed: ${parsed.resultDesc} (code ${parsed.resultCode})`,
       );
+
+      // Fire-and-forget failure email
+      if (sale.customerEmail && org) {
+        sendStorefrontPaymentFailed(
+          sale.customerEmail,
+          sale.toObject(),
+          org,
+        ).catch((err) =>
+          console.error(
+            "[MpesaCallback] payment-failed email failed:",
+            err.message,
+          ),
+        );
+      }
+
       return ack();
     }
 
-    // Payment succeeded
+    // ---------- Payment succeeded ----------
     const paidAmount = Number(parsed.amount) || 0;
     if (paidAmount <= 0) {
       console.warn("[MpesaCallback] successful callback with zero amount");
       return ack();
     }
 
-    // Record payment
     sale.payments.push({
       method: "mpesa",
       amount: paidAmount,
@@ -110,8 +126,7 @@ async function handleMpesaCallback(req, res) {
     sale.status = "completed";
     sale.completedAt = new Date();
 
-    // Deduct inventory — reuse the same logic the POS uses, but simplified
-    // for storefront orders (all items are "flexi", no Shopify).
+    // Deduct inventory — storefront orders are always "flexi" items
     try {
       await deductStorefrontInventory(sale);
     } catch (invErr) {
@@ -119,7 +134,6 @@ async function handleMpesaCallback(req, res) {
         "[MpesaCallback] inventory deduction failed:",
         invErr.message,
       );
-      // Don't fail the callback — payment is confirmed; we'll reconcile later.
       sale.inventoryStatus = "failed";
     }
 
@@ -129,17 +143,30 @@ async function handleMpesaCallback(req, res) {
       `[MpesaCallback] sale ${sale._id} paid: ${paidAmount} KES (receipt ${parsed.mpesaReceiptNumber})`,
     );
 
+    // Fire-and-forget confirmation email
+    if (sale.customerEmail && org) {
+      sendStorefrontOrderConfirmation(
+        sale.customerEmail,
+        sale.toObject(),
+        org,
+        { siteUrl: sale.storefrontUrl || "" },
+      ).catch((err) =>
+        console.error(
+          "[MpesaCallback] order confirmation email failed:",
+          err.message,
+        ),
+      );
+    }
+
     return ack();
   } catch (err) {
     console.error("[MpesaCallback] error:", err);
-    // Still ack — Safaricom retries don't help us here; we log and move on.
     return ack();
   }
 }
 
 /**
  * Deduct inventory for a confirmed storefront sale.
- * Storefront orders only contain "flexi" items (verified at checkout).
  */
 async function deductStorefrontInventory(sale) {
   const organizationId = sale.organizationId;
@@ -229,11 +256,13 @@ async function deductStorefrontInventory(sale) {
     });
   }
 
-  sale.inventoryStatus = sale.inventoryUpdates.every((u) => u.status === "success")
+  sale.inventoryStatus = sale.inventoryUpdates.every(
+    (u) => u.status === "success",
+  )
     ? "completed"
     : "partial";
 }
 
-router.post("/callback", handleMpesaCallback);
+router.post("/mpesa/callback", handleMpesaCallback);
 
 module.exports = router;

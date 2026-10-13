@@ -65,9 +65,8 @@ router.get("/:organizationId", verifyToken, async (req, res) => {
  */
 router.put("/:organizationId", verifyToken, async (req, res) => {
   try {
-    const { name, settings } = req.body;
+    const { name, slug, settings, website } = req.body;
 
-    // Verify user is owner or manager
     const membership = await UserOrganization.findOne({
       userId: req.user.userId,
       organizationId: req.params.organizationId,
@@ -95,14 +94,121 @@ router.put("/:organizationId", verifyToken, async (req, res) => {
     }
 
     const updateDoc = {};
+
     if (name !== undefined) {
-      updateDoc.name = name;
+      const trimmed = String(name).trim();
+      if (!trimmed) {
+        return res.status(400).json({ error: "name cannot be empty" });
+      }
+      updateDoc.name = trimmed;
     }
+
+    if (slug !== undefined) {
+      const cleanSlug = String(slug).toLowerCase().trim();
+      if (!/^[a-z0-9][a-z0-9-]*[a-z0-9]$/.test(cleanSlug)) {
+        return res.status(400).json({
+          error:
+            "slug must be lowercase alphanumeric with hyphens, and cannot start or end with a hyphen",
+        });
+      }
+      const conflict = await Organization.findOne({
+        slug: cleanSlug,
+        _id: { $ne: org._id },
+      })
+        .select("_id")
+        .lean();
+      if (conflict) {
+        return res
+          .status(409)
+          .json({ error: "That slug is already taken by another organization" });
+      }
+      updateDoc.slug = cleanSlug;
+    }
+
     if (settings !== undefined) {
       updateDoc.settings = {
         ...(org.settings || {}),
         ...settings,
       };
+    }
+
+    if (website !== undefined) {
+      const current = org.website || {};
+
+      // Only allow known keys — prevents accidentally writing arbitrary fields
+      const allowed = [
+        "subdomain",
+        "domain",
+        "domainVerified",
+        "published",
+        "logoUrl",
+        "faviconUrl",
+        "tagline",
+        "primaryColor",
+        "accentColor",
+        "headerLayout",
+      ];
+
+      const nextWebsite = { ...current };
+      for (const key of allowed) {
+        if (website[key] !== undefined) {
+          nextWebsite[key] = website[key];
+        }
+      }
+
+      // Validate color hex if provided
+      const hexPattern = /^#[0-9a-fA-F]{6}$/;
+      if (
+        nextWebsite.primaryColor &&
+        !hexPattern.test(nextWebsite.primaryColor)
+      ) {
+        return res.status(400).json({
+          error: "primaryColor must be a 6-digit hex color (e.g. #111111)",
+        });
+      }
+      if (
+        nextWebsite.accentColor &&
+        !hexPattern.test(nextWebsite.accentColor)
+      ) {
+        return res.status(400).json({
+          error: "accentColor must be a 6-digit hex color (e.g. #2563eb)",
+        });
+      }
+
+      // Validate headerLayout enum
+      if (
+        nextWebsite.headerLayout !== undefined &&
+        !["centered", "left"].includes(nextWebsite.headerLayout)
+      ) {
+        return res.status(400).json({
+          error: "headerLayout must be 'centered' or 'left'",
+        });
+      }
+
+      // Validate subdomain if provided
+      if (nextWebsite.subdomain !== undefined) {
+        const clean = String(nextWebsite.subdomain).toLowerCase().trim();
+        if (clean && !/^[a-z0-9][a-z0-9-]*[a-z0-9]$/.test(clean)) {
+          return res.status(400).json({
+            error:
+              "subdomain must be lowercase alphanumeric with hyphens, and cannot start or end with a hyphen",
+          });
+        }
+        nextWebsite.subdomain = clean;
+      }
+
+      // Validate domain if provided (loose — full validation at verification time)
+      if (nextWebsite.domain !== undefined) {
+        const clean = String(nextWebsite.domain).toLowerCase().trim();
+        if (clean && !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(clean)) {
+          return res.status(400).json({
+            error: "domain is not a valid hostname",
+          });
+        }
+        nextWebsite.domain = clean;
+      }
+
+      updateDoc.website = nextWebsite;
     }
 
     const updatedOrg = await Organization.findByIdAndUpdate(

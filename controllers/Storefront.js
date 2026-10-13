@@ -221,10 +221,8 @@ router.get("/products", async (req, res) => {
     const query = {
       organizationId,
       status: "active",
-      // published: true,
+      published: true,
     };
-
-    console.log({query})
 
     if (search.trim()) {
       const q = search.trim();
@@ -452,17 +450,75 @@ router.get("/collections/:slug", async (req, res) => {
 // Organization lookup by slug (used by storefront server components to
 // fetch org settings like name, currency, theme)
 // ---------------------------------------------------------------------------
-
 router.get("/org", async (req, res) => {
   try {
     const org = req.storefrontOrg;
+
+    // Resolve the location the storefront uses for delivery options
+    const locationId = await resolveLocationId(req, org);
+
+    let deliveryCategories = [];
+    let locationSummary = null;
+
+    if (locationId) {
+      const location = await Location.findOne({
+        _id: locationId,
+        organizationId: org._id,
+        status: "active",
+      })
+        .select("_id name address deliveryCategories")
+        .lean();
+
+      if (location) {
+        locationSummary = {
+          id: location._id,
+          name: location.name,
+          address: location.address || null,
+        };
+
+        deliveryCategories = (location.deliveryCategories || [])
+          .filter((c) => c.isActive !== false)
+          .map((c) => ({
+            id: c._id ? String(c._id) : `cat-${c.categoryName}`,
+            categoryName: c.categoryName,
+            description: c.description || null,
+            options: (c.childOptions || [])
+              .filter((o) => o.isActive !== false)
+              .map((o) => ({
+                id: o._id ? String(o._id) : `opt-${o.optionName}`,
+                optionName: o.optionName,
+                price: Number(o.price) || 0,
+                estimatedDays: o.estimatedDays ?? null,
+                description: o.description || null,
+                requiresAddress: o.requiresAddress !== false,
+                requiresLandmark: o.requiresLandmark === true,
+              })),
+          }))
+          .filter((c) => c.options.length > 0);
+      }
+    }
+
     return res.status(200).json({
       organization: {
         id: org._id,
         name: org.name,
         slug: org.slug,
-        settings: org.settings,
-        website: org.website,
+        settings: {
+          currency: org.settings?.currency || "KES",
+          language: org.settings?.language || "en",
+          timezone: org.settings?.timezone || "Africa/Nairobi",
+        },
+        website: {
+          logoUrl: org.website?.logoUrl || null,
+          faviconUrl: org.website?.faviconUrl || null,
+          tagline: org.website?.tagline || null,
+          primaryColor: org.website?.primaryColor || "#111111",
+          accentColor: org.website?.accentColor || "#2563eb",
+          headerLayout: org.website?.headerLayout || "left",
+          published: org.website?.published === true,
+        },
+        location: locationSummary,
+        deliveryCategories,
       },
     });
   } catch (error) {

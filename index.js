@@ -66,6 +66,7 @@ const { orgFromHost } = require("./middleware/orgFromHost");
 const storefrontCheckoutRouter = require("./controllers/StorefrontCheckout");
 const storefrontMpesaRouter = require("./controllers/StorefrontMpesa");
 
+const storefrontPendingCleanupWorker = require("./workers/storefrontPendingCleanup");
 
 const app = express();
 const port = process.env.PORT || 9200;
@@ -129,6 +130,7 @@ mongoose
       startDeliveryStatusSync();
       startLinkOfflineDeliveriesToSales();
       collectionRecomputeWorker.start();
+      storefrontPendingCleanupWorker.start();
     });
   })
   .catch((err) => {

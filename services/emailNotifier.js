@@ -314,6 +314,184 @@ const sendOrganizationInvitation = async (
   }
 };
 
+/**
+ * Format a currency amount for display in emails.
+ */
+function formatMoneyForEmail(amount, currency = "KES") {
+  const value = Number(amount) || 0;
+  try {
+    return new Intl.NumberFormat("en-KE", {
+      style: "currency",
+      currency,
+      minimumFractionDigits: 2,
+    }).format(value);
+  } catch {
+    return `${currency} ${value.toFixed(2)}`;
+  }
+}
+
+/**
+ * Send a storefront order confirmation to the customer.
+ *
+ * @param {String} email             Recipient (customer)
+ * @param {Object} sale              Sale document (plain object, lean())
+ * @param {Object} org               Organization (for name, currency)
+ * @param {Object} opts              Optional { siteUrl }
+ */
+const sendStorefrontOrderConfirmation = async (email, sale, org, opts = {}) => {
+  try {
+    const orgName = org?.name || "our store";
+    const currency = org?.settings?.currency || "KES";
+    const siteUrl = opts.siteUrl || process.env.STOREFRONT_URL || "";
+
+    const mpesaReceipt =
+      (sale.payments || []).find(
+        (p) => p.status === "completed" && p.reference,
+      )?.reference || null;
+
+    const items = Array.isArray(sale.items) ? sale.items : [];
+
+    const itemRowsHtml = items
+      .map((item) => {
+        const qty = Number(item.quantity) || 0;
+        const unit = Number(item.unitPrice) || 0;
+        const line = qty * unit;
+        const title = item.productName || item.name || "Item";
+        const variantText = Array.isArray(item.variantTitle)
+          ? item.variantTitle.map((o) => o.value).filter(Boolean).join(" / ")
+          : "";
+
+        return `
+          <tr>
+            <td style="padding: 8px 0; border-bottom: 1px solid #eee;">
+              <div style="font-weight: 500; color: #111;">${title}</div>
+              ${variantText ? `<div style="font-size: 12px; color: #666;">${variantText}</div>` : ""}
+              <div style="font-size: 12px; color: #666;">Qty ${qty} × ${formatMoneyForEmail(unit, currency)}</div>
+            </td>
+            <td style="padding: 8px 0; border-bottom: 1px solid #eee; text-align: right; font-weight: 500; color: #111;">
+              ${formatMoneyForEmail(line, currency)}
+            </td>
+          </tr>
+        `;
+      })
+      .join("");
+
+    const totalHtml = formatMoneyForEmail(sale.totalAmount, currency);
+    const taxNote =
+      Number(sale.taxAmount) > 0
+        ? `<p style="font-size: 12px; color: #666; margin: 4px 0;">Includes tax of ${formatMoneyForEmail(sale.taxAmount, currency)}</p>`
+        : "";
+
+    const trackingLink = siteUrl
+      ? `<p style="margin-top: 20px;"><a href="${siteUrl}/orders/${sale._id}" style="color: #2563eb;">View order status</a></p>`
+      : "";
+
+    const htmlContent = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
+        <h2 style="color: #111;">Order confirmed</h2>
+        <p>Hi ${sale.customerName || "there"},</p>
+        <p>Thank you for your order from <strong>${orgName}</strong>. Your payment has been received and your order is confirmed.</p>
+
+        <div style="background-color: #f0f9ff; padding: 16px; border-radius: 6px; margin: 24px 0; border: 1px solid #bae6fd;">
+          <p style="margin: 0; font-size: 12px; color: #0369a1; text-transform: uppercase; letter-spacing: 0.05em;">Order number</p>
+          <p style="margin: 4px 0 12px 0; font-family: monospace; font-size: 14px; color: #111;">${sale.receiptNumber || sale._id}</p>
+          ${
+            mpesaReceipt
+              ? `
+            <p style="margin: 0; font-size: 12px; color: #0369a1; text-transform: uppercase; letter-spacing: 0.05em;">M-Pesa receipt</p>
+            <p style="margin: 4px 0 0 0; font-family: monospace; font-size: 14px; color: #111;">${mpesaReceipt}</p>
+          `
+              : ""
+          }
+        </div>
+
+        <h3 style="font-size: 14px; text-transform: uppercase; color: #666; letter-spacing: 0.05em; margin-bottom: 8px;">Items</h3>
+        <table style="width: 100%; border-collapse: collapse;">
+          <tbody>
+            ${itemRowsHtml}
+          </tbody>
+        </table>
+
+        <table style="width: 100%; margin-top: 16px; font-size: 14px;">
+          <tr>
+            <td style="text-align: right; padding: 4px 0; color: #666;">Subtotal</td>
+            <td style="text-align: right; padding: 4px 0; width: 120px;">${formatMoneyForEmail(sale.subtotal, currency)}</td>
+          </tr>
+          ${
+            Number(sale.discountAmount) > 0
+              ? `
+            <tr>
+              <td style="text-align: right; padding: 4px 0; color: #666;">Discount</td>
+              <td style="text-align: right; padding: 4px 0;">-${formatMoneyForEmail(sale.discountAmount, currency)}</td>
+            </tr>
+          `
+              : ""
+          }
+          <tr>
+            <td style="text-align: right; padding: 8px 0 4px 0; font-weight: 600; border-top: 1px solid #ddd;">Total</td>
+            <td style="text-align: right; padding: 8px 0 4px 0; font-weight: 600; border-top: 1px solid #ddd;">${totalHtml}</td>
+          </tr>
+        </table>
+        ${taxNote}
+
+        ${trackingLink}
+
+        <p style="margin-top: 24px;">If you have any questions about your order, reply to this email.</p>
+
+        <hr style="border: 1px solid #eee; margin: 24px 0;">
+        <p style="color: #999; font-size: 12px;">${orgName}</p>
+      </div>
+    `;
+
+    await sendEmailViaBrevo(
+      email,
+      `Order confirmed — ${sale.receiptNumber || sale._id}`,
+      htmlContent,
+      orgName,
+    );
+  } catch (error) {
+    console.error("Error sending storefront order confirmation:", error);
+    throw error;
+  }
+};
+
+/**
+ * Send a storefront payment-failed notification.
+ */
+const sendStorefrontPaymentFailed = async (email, sale, org) => {
+  try {
+    const orgName = org?.name || "our store";
+
+    const htmlContent = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
+        <h2 style="color: #dc2626;">Payment not completed</h2>
+        <p>Hi ${sale.customerName || "there"},</p>
+        <p>We were unable to complete payment for your order from <strong>${orgName}</strong>.</p>
+
+        <div style="background-color: #fef2f2; padding: 16px; border-radius: 6px; margin: 24px 0; border: 1px solid #fecaca;">
+          <p style="margin: 0; font-size: 12px; color: #991b1b; text-transform: uppercase; letter-spacing: 0.05em;">Order reference</p>
+          <p style="margin: 4px 0 0 0; font-family: monospace; font-size: 14px; color: #111;">${sale.receiptNumber || sale._id}</p>
+        </div>
+
+        <p>You can try again by returning to our store. If you believe this is a mistake, reply to this email and we'll look into it.</p>
+
+        <hr style="border: 1px solid #eee; margin: 24px 0;">
+        <p style="color: #999; font-size: 12px;">${orgName}</p>
+      </div>
+    `;
+
+    await sendEmailViaBrevo(
+      email,
+      `Payment not completed — ${sale.receiptNumber || sale._id}`,
+      htmlContent,
+      orgName,
+    );
+  } catch (error) {
+    console.error("Error sending storefront payment-failed email:", error);
+    throw error;
+  }
+};
+
 module.exports = {
   sendEmailVerification,
   sendPasswordReset,
@@ -321,4 +499,7 @@ module.exports = {
   sendStatusChangeNotification,
   sendRoleChangeNotification,
   sendOrganizationInvitation,
+  // New:
+  sendStorefrontOrderConfirmation,
+  sendStorefrontPaymentFailed,
 };

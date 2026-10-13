@@ -116,6 +116,7 @@ const locationSchema = new Schema(
           },
         ],
         // Child options under this category
+
         childOptions: [
           {
             _id: Schema.Types.ObjectId,
@@ -134,8 +135,17 @@ const locationSchema = new Schema(
               type: Boolean,
               default: true,
             },
+            requiresAddress: {
+              type: Boolean,
+              default: true,
+            },
+            requiresLandmark: {
+              type: Boolean,
+              default: false,
+            },
           },
         ],
+
         createdAt: Date,
         updatedAt: Date,
       },

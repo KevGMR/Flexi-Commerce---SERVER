@@ -519,7 +519,11 @@ router.post("/:id/delivery-categories", verifyToken, async (req, res) => {
         optionName: opt.optionName,
         price: opt.price,
         estimatedDays: opt.estimatedDays || 1,
+        description: opt.description || "",
         isActive: opt.isActive !== undefined ? opt.isActive : true,
+        requiresAddress:
+          opt.requiresAddress !== undefined ? opt.requiresAddress : true,
+        requiresLandmark: opt.requiresLandmark === true,
       })),
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -755,7 +759,15 @@ router.post("/:id/delivery-categories/:categoryId/options", verifyToken, async (
   try {
     const organizationId = req.user.organizationId;
     const { id, categoryId } = req.params;
-    const { optionName, price, estimatedDays, isActive, description } = req.body;
+    const {
+      optionName,
+      price,
+      estimatedDays,
+      isActive,
+      description,
+      requiresAddress,
+      requiresLandmark,
+    } = req.body;
 
     // Validate required fields
     if (!optionName || typeof price !== "number" || price < 0) {
@@ -810,6 +822,9 @@ router.post("/:id/delivery-categories/:categoryId/options", verifyToken, async (
       estimatedDays: estimatedDays || 1,
       isActive: isActive !== undefined ? isActive : true,
       description: description || "",
+      requiresAddress:
+        requiresAddress !== undefined ? requiresAddress : true,
+      requiresLandmark: requiresLandmark === true,
     };
 
     category.childOptions.push(newOption);
@@ -850,13 +865,23 @@ router.patch("/:id/delivery-categories/:categoryId/options/:optionId", verifyTok
   try {
     const organizationId = req.user.organizationId;
     const { id, categoryId, optionId } = req.params;
-    const { optionName, price, estimatedDays, isActive, description } = req.body;
+    const {
+      optionName,
+      price,
+      estimatedDays,
+      isActive,
+      description,
+      requiresAddress,
+      requiresLandmark,
+    } = req.body;
     const hasUpdatableField =
       optionName !== undefined ||
       price !== undefined ||
       estimatedDays !== undefined ||
       isActive !== undefined ||
-      description !== undefined;
+      description !== undefined ||
+      requiresAddress !== undefined ||
+      requiresLandmark !== undefined;
 
     if (!hasUpdatableField) {
       return res.status(400).json({
@@ -967,6 +992,34 @@ router.patch("/:id/delivery-categories/:categoryId/options/:optionId", verifyTok
 
     if (description !== undefined && (option.description || "") !== description) {
       option.description = description;
+      changed = true;
+    }
+
+    if (
+      requiresAddress !== undefined &&
+      option.requiresAddress !== requiresAddress
+    ) {
+      if (typeof requiresAddress !== "boolean") {
+        return res.status(400).json({
+          success: false,
+          message: "requiresAddress must be a boolean",
+        });
+      }
+      option.requiresAddress = requiresAddress;
+      changed = true;
+    }
+
+    if (
+      requiresLandmark !== undefined &&
+      option.requiresLandmark !== requiresLandmark
+    ) {
+      if (typeof requiresLandmark !== "boolean") {
+        return res.status(400).json({
+          success: false,
+          message: "requiresLandmark must be a boolean",
+        });
+      }
+      option.requiresLandmark = requiresLandmark;
       changed = true;
     }
 

@@ -9,6 +9,7 @@ const Variant = require("../models/Variant");
 const Inventory = require("../models/Inventory");
 const Location = require("../models/Location");
 const Organization = require("../models/Organization");
+const DeliveryFee = require("../models/DeliveryFee");
 const secretBox = require("../services/secretBox");
 const daraja = require("../services/daraja");
 
@@ -17,9 +18,13 @@ const daraja = require("../services/daraja");
 // ---------------------------------------------------------------------------
 
 async function resolveLocationId(org, requestedLocationId) {
-  if (requestedLocationId && mongoose.Types.ObjectId.isValid(requestedLocationId)) {
+  if (
+    requestedLocationId &&
+    mongoose.Types.ObjectId.isValid(requestedLocationId)
+  ) {
     return requestedLocationId;
   }
+
   const defaultLoc = await Location.findOne({
     organizationId: org._id,
     isDefault: true,
@@ -44,7 +49,23 @@ function buildCallbackUrl(org, callbackSecret) {
     throw new Error("PUBLIC_API_URL is not set (needed for Daraja callback)");
   }
   const url = `${base.replace(/\/$/, "")}/storefront/mpesa/callback`;
-  return callbackSecret ? `${url}?key=${encodeURIComponent(callbackSecret)}` : url;
+  return callbackSecret
+    ? `${url}?key=${encodeURIComponent(callbackSecret)}`
+    : url;
+}
+
+function buildStorefrontUrl(org) {
+  const rootDomain = process.env.STOREFRONT_ROOT_DOMAIN;
+  const protocol = process.env.STOREFRONT_PROTOCOL || "https";
+  if (!rootDomain) return null;
+
+  if (org?.website?.domain && org?.website?.domainVerified) {
+    return `${protocol}://${org.website.domain}`;
+  }
+  if (org?.website?.subdomain) {
+    return `${protocol}://${org.website.subdomain}.${rootDomain}`;
+  }
+  return null;
 }
 
 function getDecryptedDaraja(org) {
@@ -61,18 +82,10 @@ function getDecryptedDaraja(org) {
   };
 }
 
-/**
- * Compute the total from the client's cart, comparing against the DB.
- * Never trust client-submitted prices.
- *
- * Payload shape expected from the storefront:
- *   {
- *     items: [{ variantId, quantity }],
- *     customer: { name, phone, email? },
- *     shipping: { street, city, ... } | null,
- *     notes?: string,
- *   }
- */
+// ---------------------------------------------------------------------------
+// Cart pricing
+// ---------------------------------------------------------------------------
+
 async function priceCart(organizationId, locationId, rawItems) {
   if (!Array.isArray(rawItems) || rawItems.length === 0) {
     throw Object.assign(new Error("items is required"), { status: 400 });
@@ -81,13 +94,16 @@ async function priceCart(organizationId, locationId, rawItems) {
     throw Object.assign(new Error("too many items"), { status: 400 });
   }
 
-  const variantIds = rawItems.map((i) => i.variantId).filter(Boolean);
   const invalid = rawItems.find(
     (i) => !i.variantId || !mongoose.Types.ObjectId.isValid(i.variantId),
   );
   if (invalid) {
-    throw Object.assign(new Error("invalid variantId in items"), { status: 400 });
+    throw Object.assign(new Error("invalid variantId in items"), {
+      status: 400,
+    });
   }
+
+  const variantIds = rawItems.map((i) => i.variantId);
 
   const variants = await Variant.find({
     _id: { $in: variantIds },
@@ -131,9 +147,10 @@ async function priceCart(organizationId, locationId, rawItems) {
 
     const product = productById.get(String(variant.productId));
     if (!product) {
-      throw Object.assign(new Error(`Product not available: ${variant.productId}`), {
-        status: 400,
-      });
+      throw Object.assign(
+        new Error(`Product not available: ${variant.productId}`),
+        { status: 400 },
+      );
     }
 
     const qty = Math.floor(Number(raw.quantity) || 0);
@@ -143,8 +160,10 @@ async function priceCart(organizationId, locationId, rawItems) {
       });
     }
 
-    // Stock check for tracked variants
-    if (variant.trackInventory !== false && !variant.continueSellingWhenOutOfStock) {
+    if (
+      variant.trackInventory !== false &&
+      !variant.continueSellingWhenOutOfStock
+    ) {
       const inv = inventoryByVariant.get(String(variant._id));
       const available = inv?.available ?? inv?.onHand ?? 0;
       if (available < qty) {
@@ -166,7 +185,10 @@ async function priceCart(organizationId, locationId, rawItems) {
       productId: product._id,
       variantId: variant._id,
       variantTitle: Array.isArray(variant.selectedOptions)
-        ? variant.selectedOptions.map((o) => ({ name: o.name, value: o.value }))
+        ? variant.selectedOptions.map((o) => ({
+            name: o.name,
+            value: o.value,
+          }))
         : [],
       productName: product.name,
       sku: variant.sku || product.sku || "",
@@ -190,17 +212,132 @@ async function priceCart(organizationId, locationId, rawItems) {
 }
 
 // ---------------------------------------------------------------------------
+// Delivery validation + pricing
+// ---------------------------------------------------------------------------
+
+/**
+ * Validate the customer's chosen delivery option against the org's location.
+ * Returns a normalized object the checkout flow and DeliveryFee creation
+ * can use. Server-derived fee — never trusts a client-sent price.
+ */
+async function priceDelivery(organizationId, locationId, raw) {
+  if (!raw) {
+    throw Object.assign(new Error("delivery selection is required"), {
+      status: 400,
+    });
+  }
+
+  if (!raw.categoryName || !raw.optionName) {
+    throw Object.assign(
+      new Error("delivery requires categoryName and optionName"),
+      { status: 400 },
+    );
+  }
+
+  const location = await Location.findOne({
+    _id: locationId,
+    organizationId,
+    status: "active",
+  })
+    .select("deliveryCategories")
+    .lean();
+
+  if (!location) {
+    throw Object.assign(new Error("Delivery location not found"), {
+      status: 400,
+    });
+  }
+
+  const category = (location.deliveryCategories || []).find(
+    (c) => c.categoryName === raw.categoryName && c.isActive !== false,
+  );
+  if (!category) {
+    throw Object.assign(new Error("Delivery category not found"), {
+      status: 400,
+    });
+  }
+
+  const option = (category.childOptions || []).find(
+    (o) => o.optionName === raw.optionName && o.isActive !== false,
+  );
+  if (!option) {
+    throw Object.assign(new Error("Delivery option not found"), {
+      status: 400,
+    });
+  }
+
+  const fee = Number(option.price) || 0;
+  const requiresAddress = option.requiresAddress !== false;
+  const requiresLandmark = option.requiresLandmark === true;
+
+  const address = raw.address || {};
+
+  if (requiresAddress) {
+    if (!address.street || !address.city) {
+      throw Object.assign(
+        new Error("Delivery address requires street and city"),
+        { status: 400 },
+      );
+    }
+    if (requiresLandmark && !address.landmark) {
+      throw Object.assign(
+        new Error("This delivery option requires a landmark"),
+        { status: 400 },
+      );
+    }
+  }
+
+  // Normalize the address. For pickups (requiresAddress === false), store a
+  // descriptive marker so the DeliveryFee doc has valid street/city fields.
+  const normalizedAddress = requiresAddress
+    ? {
+        street: String(address.street).trim(),
+        city: String(address.city).trim(),
+        state: address.state ? String(address.state).trim() : undefined,
+        postalCode: address.postalCode
+          ? String(address.postalCode).trim()
+          : undefined,
+        country: address.country ? String(address.country).trim() : "Kenya",
+        landmark: address.landmark ? String(address.landmark).trim() : undefined,
+      }
+    : {
+        street: `Pickup: ${category.categoryName}`,
+        city: "N/A",
+        country: "Kenya",
+      };
+
+  return {
+    categoryName: category.categoryName,
+    optionName: option.optionName,
+    fee,
+    estimatedDays: option.estimatedDays ?? null,
+    requiresAddress,
+    requiresLandmark,
+    address: normalizedAddress,
+    notes: raw.notes ? String(raw.notes).trim() : null,
+    categoryStatus:
+      (Array.isArray(category.statusWorkflow) &&
+        category.statusWorkflow[0]?.status) ||
+      "pending",
+  };
+}
+
+// ---------------------------------------------------------------------------
 // POST /storefront/checkout
 // ---------------------------------------------------------------------------
 
 router.post("/checkout", async (req, res) => {
+  let sale = null;
+
   try {
     const org = req.storefrontOrg;
     const organizationId = org._id;
 
-    // 1. Load fresh org (need daraja fields, which aren't in the orgFromHost select)
+    // Load full org including decrypted daraja fields
     const fullOrg = await Organization.findById(organizationId)
-      .select("+daraja.consumerKey +daraja.consumerSecret +daraja.passkey daraja name slug settings")
+      .select(
+        "+daraja.consumerKey +daraja.consumerSecret +daraja.passkey daraja name slug settings website",
+      )
       .lean();
 
     if (!fullOrg) {
@@ -215,11 +352,17 @@ router.post("/checkout", async (req, res) => {
       });
     }
 
-    const { items, customer, shipping, notes } = req.body || {};
+    const { items, customer, delivery, notes } = req.body || {};
 
     if (!customer?.phone) {
       return res.status(400).json({ error: "customer.phone is required" });
     }
+    if (!customer?.name || !customer.name.trim()) {
+      return res
+        .status(400)
+        .json({ error: "customer.name is required" });
+    }
+
     const msisdn = daraja.normalizePhone(customer.phone);
     if (!msisdn) {
       return res.status(400).json({
@@ -236,7 +379,7 @@ router.post("/checkout", async (req, res) => {
       });
     }
 
-    // 2. Price the cart against the DB
+    // ---- Price cart ----
     const { pricedItems, subtotal } = await priceCart(
       organizationId,
       locationId,
@@ -247,60 +390,116 @@ router.post("/checkout", async (req, res) => {
       return res.status(400).json({ error: "Cart total must be positive" });
     }
 
-    // 3. Resolve tax from location settings
+    // ---- Price delivery ----
+    const deliveryPriced = await priceDelivery(
+      organizationId,
+      locationId,
+      delivery,
+    );
+
+    // ---- Tax from location ----
     const location = await Location.findById(locationId)
       .select("taxRate taxMode")
       .lean();
     const taxRate = Number(location?.taxRate) || 0;
-    const taxMode = location?.taxMode === "exclusive" ? "exclusive" : "inclusive";
+    const taxMode =
+      location?.taxMode === "exclusive" ? "exclusive" : "inclusive";
 
     let taxAmount = 0;
-    let totalAmount = subtotal;
+    let itemsTotal = subtotal;
     if (taxRate > 0) {
       if (taxMode === "exclusive") {
         taxAmount = subtotal * taxRate;
-        totalAmount = subtotal + taxAmount;
+        itemsTotal = subtotal + taxAmount;
       } else {
         taxAmount = subtotal - subtotal / (1 + taxRate);
-        totalAmount = subtotal;
+        itemsTotal = subtotal;
       }
     }
 
-    totalAmount = Math.round(totalAmount * 100) / 100;
-    taxAmount = Math.round(taxAmount * 100) / 100;
+    const deliveryFeeAmount = deliveryPriced.fee;
+    const totalAmount = itemsTotal + deliveryFeeAmount;
 
-    // 4. Create the Sale (pending payment)
+    const roundedTotal = Math.round(totalAmount * 100) / 100;
+    const roundedTax = Math.round(taxAmount * 100) / 100;
+
+    // ---- Create Sale ----
     const receiptNumber = `WEB-${organizationId}-${Date.now()}`;
-    const transactionId = `TXN-WEB-${organizationId}-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
+    const transactionId = `TXN-WEB-${organizationId}-${Date.now()}-${crypto
+      .randomBytes(3)
+      .toString("hex")}`;
 
-    const sale = new Sale({
+    sale = new Sale({
       organizationId,
       locationId,
       salesChannel: "storefront",
+      storefrontUrl: buildStorefrontUrl(fullOrg),
       receiptNumber,
       transactionId,
       items: pricedItems,
-      customerName: customer.name || null,
+      customerName: customer.name.trim(),
       customerPhone: msisdn,
-      customerEmail: customer.email || null,
+      customerEmail: customer.email ? String(customer.email).trim() : null,
       subtotal,
       discountAmount: 0,
-      taxAmount,
+      taxAmount: roundedTax,
       taxMode,
       taxRateUsed: taxRate,
-      totalAmount,
+      totalAmount: roundedTotal,
+      deliveryFeeAmount,
+      requiresDelivery: true,
+      deliveryStatus: "pending",
+      deliveryCategory: deliveryPriced.categoryName,
+      deliveryOption: deliveryPriced.optionName,
+      categoryStatus: deliveryPriced.categoryStatus,
+      deliveryStatusSyncedAt: new Date(),
       paymentMethod: "mpesa",
       payments: [],
       paymentStatus: "pending",
-      // cashierId left null — storefront orders have no POS cashier
       status: "pending",
-      notes: notes || null,
+      notes: notes ? String(notes).trim() : null,
       tags: ["storefront", "online-order"],
     });
 
     await sale.save();
 
-    // 5. Initiate STK push
+    // ---- Create DeliveryFee doc ----
+    try {
+      const deliveryFeeDoc = new DeliveryFee({
+        organizationId,
+        locationId,
+        saleId: sale._id,
+        deliveryCategory: deliveryPriced.categoryName,
+        deliveryOption: deliveryPriced.optionName,
+        amount: deliveryPriced.fee,
+        isTaxable: false,
+        taxAmount: 0,
+        totalAmount: deliveryPriced.fee,
+        deliveryAddress: deliveryPriced.address,
+        recipientName: customer.name.trim(),
+        recipientPhone: msisdn,
+        recipientEmail: customer.email
+          ? String(customer.email).trim()
+          : undefined,
+        categoryStatus: deliveryPriced.categoryStatus,
+        notes: deliveryPriced.notes || undefined,
+        validationStatus: "pending",
+        // createdBy intentionally omitted — storefront order
+      });
+      await deliveryFeeDoc.save();
+      sale.deliveryFeeId = deliveryFeeDoc._id;
+      await sale.save();
+    } catch (dfErr) {
+      console.error(
+        "[StorefrontCheckout] DeliveryFee creation failed:",
+        dfErr.message,
+      );
+      // Non-fatal — sale exists, delivery tracking can be reconciled later
+      sale.notes = `${sale.notes || ""}\n[delivery-fee-creation-failed]`.trim();
+      await sale.save();
+    }
+
+    // ---- Initiate STK push ----
     const callbackUrl = buildCallbackUrl(org, darajaCreds.callbackSecret);
 
     let stkResult;
@@ -313,16 +512,16 @@ router.post("/checkout", async (req, res) => {
         shortcode: darajaCreds.shortcode,
         passkey: darajaCreds.passkey,
         phone: msisdn,
-        amount: Math.round(totalAmount),
+        amount: Math.round(roundedTotal),
         accountReference: receiptNumber.slice(-12),
         transactionDesc: "Order Payment",
         callbackUrl,
       });
     } catch (stkErr) {
-      // Mark the sale failed and return the Daraja error to the client
       sale.paymentStatus = "failed";
       sale.status = "voided";
       sale.voidReason = `STK push failed: ${stkErr.message}`;
+      sale.voidedAt = new Date();
       await sale.save();
 
       console.error("[StorefrontCheckout] STK push failed:", stkErr.message);
@@ -337,6 +536,7 @@ router.post("/checkout", async (req, res) => {
       sale.paymentStatus = "failed";
       sale.status = "voided";
       sale.voidReason = `STK push declined: ${stkResult.responseDescription}`;
+      sale.voidedAt = new Date();
       await sale.save();
 
       return res.status(502).json({
@@ -346,7 +546,7 @@ router.post("/checkout", async (req, res) => {
       });
     }
 
-    // 6. Store the CheckoutRequestID for callback lookup
+    // ---- Store CheckoutRequestID ----
     sale.checkoutRequestId = stkResult.checkoutRequestId;
     await sale.save();
 
@@ -356,6 +556,7 @@ router.post("/checkout", async (req, res) => {
         saleId: sale._id,
         receiptNumber: sale.receiptNumber,
         totalAmount: sale.totalAmount,
+        deliveryFeeAmount: sale.deliveryFeeAmount,
         paymentStatus: sale.paymentStatus,
       },
       mpesa: {
@@ -374,7 +575,6 @@ router.post("/checkout", async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // GET /storefront/orders/:saleId/status
-// Polling endpoint for the storefront UI
 // ---------------------------------------------------------------------------
 
 router.get("/orders/:saleId/status", async (req, res) => {
@@ -392,7 +592,7 @@ router.get("/orders/:saleId/status", async (req, res) => {
       salesChannel: "storefront",
     })
       .select(
-        "receiptNumber totalAmount paymentStatus status payments checkoutRequestId createdAt",
+        "receiptNumber subtotal totalAmount deliveryFeeAmount paymentStatus status payments checkoutRequestId createdAt completedAt",
       )
       .lean();
 
@@ -408,10 +608,13 @@ router.get("/orders/:saleId/status", async (req, res) => {
       order: {
         saleId: sale._id,
         receiptNumber: sale.receiptNumber,
+        subtotal: sale.subtotal,
+        deliveryFeeAmount: sale.deliveryFeeAmount,
         totalAmount: sale.totalAmount,
         paymentStatus: sale.paymentStatus,
         status: sale.status,
         createdAt: sale.createdAt,
+        completedAt: sale.completedAt,
         mpesaReceiptNumber: lastPayment?.reference || null,
       },
     });

@@ -109,7 +109,7 @@ const deliveryFeeSchema = new Schema(
     createdBy: {
       type: Schema.Types.ObjectId,
       ref: "User",
-      required: true,
+      // required: true,
     },
     lastModifiedBy: {
       type: Schema.Types.ObjectId,

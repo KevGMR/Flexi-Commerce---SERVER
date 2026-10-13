@@ -1954,6 +1954,7 @@ const listSales = async (req, res) => {
       search,
       limit = 50,
       page = 1,
+      salesChannel
     } = req.query;
 
     const filter = { organizationId };
@@ -2010,6 +2011,8 @@ const listSales = async (req, res) => {
     if (req.query.paymentStatus) {
       filter.paymentStatus = req.query.paymentStatus;
     }
+
+    if (salesChannel) filter.salesChannel = salesChannel;
 
     const requestedTimeBasis = timeBasis === "payment" ? "payment" : "sale";
     const startDateObj = startDate ? new Date(startDate) : null;

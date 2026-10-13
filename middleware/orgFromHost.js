@@ -1,21 +1,15 @@
 const Organization = require("../models/Organization");
 
-/**
- * Middleware for public storefront endpoints.
- *
- * Verifies the request came from the trusted Next.js storefront (via a
- * shared secret header), then resolves the organization from the
- * X-Organization-Slug header.
- *
- * Attaches req.storefrontOrg. Does NOT require a user JWT.
- *
- * Required env: STOREFRONT_API_KEY
- * Required headers:
- *   X-Storefront-Key: <shared secret>
- *   X-Organization-Slug: <org slug>
- */
 async function orgFromHost(req, res, next) {
   try {
+    // The host lookup endpoint runs before we know the slug. Skip.
+    // req.path inside this middleware is relative to the mount point
+    // ("/storefront"), so "/orgs/by-host" here means
+    // "GET /storefront/orgs/by-host".
+    if (req.path === "/orgs/by-host") {
+      return next();
+    }
+
     const expectedKey = process.env.STOREFRONT_API_KEY;
 
     if (!expectedKey) {
