@@ -354,6 +354,154 @@ router.post("/:id/set-shopify-location", verifyToken, async (req, res) => {
   }
 });
 
+
+/**
+ * Update receipt customization for a location
+ * PATCH /locations/:id/receipt
+ */
+router.patch("/:id/receipt", verifyToken, async (req, res) => {
+  try {
+    const organizationId = req.user.organizationId;
+    const { id } = req.params;
+    const {
+      logoUrl,
+      headerLines,
+      footerParagraphs,
+      thankYouLine,
+      termsLine,
+      showLocationName,
+      showLocationAddress,
+      showLocationPhone,
+      showTaxId,
+      showCashier,
+      showCustomer,
+      showNotes,
+      showDeliveryBlock,
+      customTaxIdLabel,
+    } = req.body || {};
+
+    const location = await Location.findOne({ _id: id, organizationId });
+    if (!location) {
+      return res.status(404).json({ error: "Location not found" });
+    }
+
+    // Initialize receipt object if it doesn't exist yet
+    if (!location.receipt) {
+      location.receipt = {};
+    }
+    const r = location.receipt;
+
+    // String fields — validate length
+    const str = (v, max) =>
+      typeof v === "string" ? v.slice(0, max) : null;
+
+    if (logoUrl !== undefined) {
+      const v = str(logoUrl, 600);
+      if (v === null) {
+        return res.status(400).json({ error: "logoUrl must be a string" });
+      }
+      r.logoUrl = v;
+    }
+
+    if (thankYouLine !== undefined) {
+      const v = str(thankYouLine, 200);
+      if (v === null) {
+        return res
+          .status(400)
+          .json({ error: "thankYouLine must be a string" });
+      }
+      r.thankYouLine = v;
+    }
+
+    if (termsLine !== undefined) {
+      const v = str(termsLine, 300);
+      if (v === null) {
+        return res.status(400).json({ error: "termsLine must be a string" });
+      }
+      r.termsLine = v;
+    }
+
+    if (customTaxIdLabel !== undefined) {
+      const v = str(customTaxIdLabel, 40);
+      if (v === null) {
+        return res
+          .status(400)
+          .json({ error: "customTaxIdLabel must be a string" });
+      }
+      r.customTaxIdLabel = v;
+    }
+
+    // Array fields
+    if (headerLines !== undefined) {
+      if (!Array.isArray(headerLines)) {
+        return res
+          .status(400)
+          .json({ error: "headerLines must be an array" });
+      }
+      r.headerLines = headerLines
+        .filter((l) => typeof l === "string" && l.trim())
+        .slice(0, 4)
+        .map((l) => l.slice(0, 100));
+    }
+
+    if (footerParagraphs !== undefined) {
+      if (!Array.isArray(footerParagraphs)) {
+        return res
+          .status(400)
+          .json({ error: "footerParagraphs must be an array" });
+      }
+      r.footerParagraphs = footerParagraphs
+        .filter((p) => typeof p === "string" && p.trim())
+        .slice(0, 4)
+        .map((p) => p.slice(0, 300));
+    }
+
+    // Boolean toggles
+    const toggles = [
+      "showLocationName",
+      "showLocationAddress",
+      "showLocationPhone",
+      "showTaxId",
+      "showCashier",
+      "showCustomer",
+      "showNotes",
+      "showDeliveryBlock",
+    ];
+    for (const key of toggles) {
+      if (req.body[key] !== undefined) {
+        if (typeof req.body[key] !== "boolean") {
+          return res
+            .status(400)
+            .json({ error: `${key} must be a boolean` });
+        }
+        r[key] = req.body[key];
+      }
+    }
+
+    await location.save();
+
+    await logTokenEvent(
+      req.user.userId,
+      organizationId,
+      "location_updated",
+      req.ip,
+      req.get("user-agent"),
+      { details: `Receipt config updated for location: ${location.name}` },
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Receipt settings updated",
+      receipt: location.receipt,
+    });
+  } catch (error) {
+    console.error("Update receipt settings error:", error);
+    return res
+      .status(500)
+      .json({ error: "Failed to update receipt settings" });
+  }
+});
+
 /**
  * Update delivery fee settings for a location
  * PATCH /locations/:id/delivery-settings

@@ -59,6 +59,43 @@ const locationSchema = new Schema(
       type: Boolean,
       default: false,
     },
+
+        // Receipt customization (per location)
+    receipt: {
+      logoUrl: { type: String, default: "" },
+      headerLines: {
+        type: [String],
+        default: [],
+        validate: {
+          validator: (arr) => arr.length <= 4,
+          message: "Maximum 4 header lines",
+        },
+      },
+      footerParagraphs: {
+        type: [String],
+        default: [],
+        validate: {
+          validator: (arr) => arr.length <= 4,
+          message: "Maximum 4 footer paragraphs",
+        },
+      },
+      thankYouLine: { type: String, default: "Thank you for your purchase!" },
+      termsLine: { type: String, default: "" },
+
+      // Section toggles
+      showLocationName: { type: Boolean, default: true },
+      showLocationAddress: { type: Boolean, default: true },
+      showLocationPhone: { type: Boolean, default: true },
+      showTaxId: { type: Boolean, default: false },
+      showCashier: { type: Boolean, default: true },
+      showCustomer: { type: Boolean, default: true },
+      showNotes: { type: Boolean, default: true },
+      showDeliveryBlock: { type: Boolean, default: true },
+
+      // Optional custom text for specific slots
+      customTaxIdLabel: { type: String, default: "Tax ID" },
+    },
+
     // Delivery fee settings (legacy - kept for backward compatibility)
     deliveryFeeSettings: {
       enableDeliveryFees: {

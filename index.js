@@ -13,6 +13,10 @@ const cookieParser = require("cookie-parser");
 
 
 require("dotenv").config();
+
+const dns = require("dns");
+dns.setServers(["8.8.8.8", "1.1.1.1"]);
+
 const productImagesRouter = require("./controllers/ProductImages");
 const optionPresetsRouter = require("./controllers/OptionPresets");
 const userRouter = require("./controllers/User");
