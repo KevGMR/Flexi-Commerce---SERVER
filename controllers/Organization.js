@@ -16,6 +16,198 @@ const { loginLimiter } = require("../middleware/rateLimiter");
 
 const VALID_TAX_MODES = ["inclusive", "exclusive"];
 
+const HOMEPAGE_SECTION_TYPES = [
+  "hero",
+  "featured-products",
+  "collection",
+  "rich-text",
+  "trust-strip",
+  "banner",
+  "featured-category",
+  "image-text",
+];
+/**
+ * Validate the homepage.sections array. Returns { ok: true, sections } on
+ * success, { ok: false, error } on failure. Rejects unknown types and
+ * validates per-type config shapes. Never trusts client input.
+ */
+function validateHomepageSections(input) {
+  if (input === undefined) return { ok: true, sections: undefined };
+  if (!Array.isArray(input)) {
+    return { ok: false, error: "homepage.sections must be an array" };
+  }
+  if (input.length > 30) {
+    return { ok: false, error: "Maximum 30 sections allowed" };
+  }
+
+  const seenIds = new Set();
+  const sections = [];
+
+  for (let i = 0; i < input.length; i++) {
+    const s = input[i];
+    if (!s || typeof s !== "object") {
+      return { ok: false, error: `Section ${i} is not an object` };
+    }
+    if (!s.id || typeof s.id !== "string") {
+      return { ok: false, error: `Section ${i} is missing an id` };
+    }
+    if (seenIds.has(s.id)) {
+      return { ok: false, error: `Section id "${s.id}" is duplicated` };
+    }
+    seenIds.add(s.id);
+
+    if (!HOMEPAGE_SECTION_TYPES.includes(s.type)) {
+      return {
+        ok: false,
+        error: `Section ${i} has an invalid type "${s.type}"`,
+      };
+    }
+
+    const config = s.config || {};
+    const check = validateSectionConfig(s.type, config, i);
+    if (!check.ok) return check;
+
+    sections.push({
+      id: s.id,
+      type: s.type,
+      config: check.config,
+    });
+  }
+
+  return { ok: true, sections };
+}
+
+function validateSectionConfig(type, config, i) {
+  const str = (v, max = 500) =>
+    typeof v === "string" ? v.slice(0, max) : "";
+  const num = (v, min, max, fallback) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(min, Math.min(max, n));
+  };
+
+  switch (type) {
+        case "hero": {
+      const align = ["left", "center", "right"].includes(config.align)
+        ? config.align
+        : "left";
+      return {
+        ok: true,
+        config: {
+          heading: str(config.heading, 120),
+          subheading: str(config.subheading, 240),
+          ctaLabel: str(config.ctaLabel, 40),
+          ctaHref: str(config.ctaHref, 300),
+          imageUrl: str(config.imageUrl, 600),
+          imageUrlMobile: str(config.imageUrlMobile, 600),
+          align,
+          fullHeight: config.fullHeight === true,
+        },
+      };
+    }
+
+    case "featured-products": {
+      const mode = config.mode === "manual" ? "manual" : "latest";
+      const manualIds = Array.isArray(config.productIds)
+        ? config.productIds.filter((id) => typeof id === "string").slice(0, 24)
+        : [];
+      return {
+        ok: true,
+        config: {
+          heading: str(config.heading, 120),
+          subheading: str(config.subheading, 240),
+          mode,
+          productIds: manualIds,
+          limit: num(config.limit, 1, 24, 8),
+        },
+      };
+    }
+
+    case "collection": {
+      return {
+        ok: true,
+        config: {
+          heading: str(config.heading, 120),
+          subheading: str(config.subheading, 240),
+          collectionSlug: str(config.collectionSlug, 200),
+          limit: num(config.limit, 1, 24, 8),
+        },
+      };
+    }
+
+    case "rich-text": {
+      return {
+        ok: true,
+        config: {
+          heading: str(config.heading, 120),
+          body: str(config.body, 4000),
+        },
+      };
+    }
+
+    case "trust-strip": {
+      const items = Array.isArray(config.items)
+        ? config.items.slice(0, 4).map((it) => ({
+            title: str(it?.title, 80),
+            body: str(it?.body, 240),
+          }))
+        : [];
+      return {
+        ok: true,
+        config: { items },
+      };
+    }
+
+    case "banner": {
+      return {
+        ok: true,
+        config: {
+          imageUrl: str(config.imageUrl, 600),
+          imageUrlMobile: str(config.imageUrlMobile, 600),
+          href: str(config.href, 300),
+          alt: str(config.alt, 120),
+        },
+      };
+    }
+
+    case "featured-category": {
+      const slugs = Array.isArray(config.categorySlugs)
+        ? config.categorySlugs
+            .filter((s) => typeof s === "string")
+            .slice(0, 6)
+        : [];
+      return {
+        ok: true,
+        config: {
+          heading: str(config.heading, 120),
+          subheading: str(config.subheading, 240),
+          categorySlugs: slugs,
+        },
+      };
+    }
+
+    case "image-text": {
+      const position = config.imagePosition === "right" ? "right" : "left";
+      return {
+        ok: true,
+        config: {
+          heading: str(config.heading, 120),
+          subheading: str(config.subheading, 240),
+          body: str(config.body, 2000),
+          imageUrl: str(config.imageUrl, 600),
+          imageUrlMobile: str(config.imageUrlMobile, 600),
+          imagePosition: position,
+          ctaLabel: str(config.ctaLabel, 40),
+          ctaHref: str(config.ctaHref, 300),
+        },
+      };
+    }
+
+    default:
+      return { ok: false, error: `Unknown section type "${type}"` };
+  }
+}
+
 /**
  * Get current organization details
  * GET /organizations/:organizationId
@@ -147,6 +339,7 @@ router.put("/:organizationId", verifyToken, async (req, res) => {
         "primaryColor",
         "accentColor",
         "headerLayout",
+        "homepage",
       ];
 
       const nextWebsite = { ...current };
@@ -154,6 +347,15 @@ router.put("/:organizationId", verifyToken, async (req, res) => {
         if (website[key] !== undefined) {
           nextWebsite[key] = website[key];
         }
+      }
+
+      // Homepage sections validation
+      if (website.homepage !== undefined) {
+        const sectionsResult = validateHomepageSections(website.homepage?.sections);
+        if (!sectionsResult.ok) {
+          return res.status(400).json({ error: sectionsResult.error });
+        }
+        nextWebsite.homepage = { sections: sectionsResult.sections };
       }
 
       // Validate color hex if provided

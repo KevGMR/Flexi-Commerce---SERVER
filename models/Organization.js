@@ -45,7 +45,6 @@ const organizationSchema = new Schema(
       domainVerified: { type: Boolean, default: false },
       published: { type: Boolean, default: false },
 
-      // Brand identity (used by the storefront)
       logoUrl: String,
       faviconUrl: String,
       tagline: String,
@@ -55,6 +54,34 @@ const organizationSchema = new Schema(
         type: String,
         enum: ["centered", "left"],
         default: "left",
+      },
+
+      // NEW — homepage builder
+      homepage: {
+        sections: {
+          type: [
+            {
+              _id: false,                 // no Mongo-generated _id; client sends its own
+              id: { type: String, required: true },
+              type: {
+                type: String,
+                required: true,
+                enum: [
+                  "hero",
+                  "featured-products",
+                  "collection",
+                  "rich-text",
+                  "trust-strip",
+                  "banner",
+                  "featured-category",
+                  "image-text",
+                ],
+              },
+              config: { type: mongoose.Schema.Types.Mixed, default: {} },
+            },
+          ],
+          default: [],
+        },
       },
     },
 

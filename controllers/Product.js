@@ -1,5 +1,6 @@
 const express = require("express");
 const crypto = require("crypto");
+const mongoose = require("mongoose");
 const router = express.Router();
 
 const Product = require("../models/Product");
@@ -650,6 +651,49 @@ router.get("/", verifyToken, async (req, res) => {
     });
   } catch (error) {
     console.error("Get products error:", error);
+    return res.status(500).json({ error: "Failed to fetch products" });
+  }
+});
+
+/**
+ * POST /products/by-ids
+ * Fetch multiple products by _id in a single request.
+ * Body: { ids: string[] }
+ */
+router.post("/by-ids", verifyToken, async (req, res) => {
+  try {
+    const organizationId = req.user.organizationId;
+    const { ids } = req.body || {};
+
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(200).json({ products: [] });
+    }
+    if (ids.length > 200) {
+      return res
+        .status(400)
+        .json({ error: "Maximum 200 ids per request" });
+    }
+
+    const validIds = ids.filter((id) => mongoose.Types.ObjectId.isValid(id));
+    if (validIds.length === 0) {
+      return res.status(200).json({ products: [] });
+    }
+
+    const products = await Product.find({
+      _id: { $in: validIds },
+      organizationId,
+    })
+      .select("_id name sku images price status")
+      .lean();
+
+    const byId = new Map(products.map((p) => [String(p._id), p]));
+    const ordered = validIds
+      .map((id) => byId.get(String(id)))
+      .filter(Boolean);
+
+    return res.status(200).json({ products: ordered });
+  } catch (error) {
+    console.error("Products by-ids error:", error);
     return res.status(500).json({ error: "Failed to fetch products" });
   }
 });

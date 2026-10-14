@@ -58,6 +58,24 @@ function publicProduct(p, variantAvailability) {
     image: v.images?.[0]?.url || null,
   }));
 
+  // First two images: primary + hover (if present)
+  const images = (p.images || []).map((img) => ({
+    url: img.url,
+    alt: img.alt,
+  }));
+
+  // Extract sizes from options — an option named "Size" or "Sizes"
+  // (case-insensitive). Falls back to first option with 3–10 values.
+  let sizes = [];
+  if (Array.isArray(p.options) && p.options.length > 0) {
+    const sizeOption =
+      p.options.find((o) => /^sizes?$/i.test((o.name || "").trim())) ||
+      p.options.find((o) => Array.isArray(o.values) && o.values.length >= 3 && o.values.length <= 10);
+    if (sizeOption) {
+      sizes = (sizeOption.values || []).slice(0, 6);
+    }
+  }
+
   return {
     id: p._id,
     name: p.name,
@@ -68,14 +86,14 @@ function publicProduct(p, variantAvailability) {
     tags: p.tags || [],
     price: p.price,
     compareAtPrice: p.compareAtPrice,
-    images: (p.images || []).map((img) => ({
-      url: img.url,
-      alt: img.alt,
-    })),
+    images,
     defaultImage:
       (p.images || []).find((i) => i.isDefault)?.url ||
       (p.images || [])[0]?.url ||
       null,
+    // Second image used for hover state
+    hoverImage: images[1]?.url || null,
+    sizes,
     variants,
     options: p.options || [],
     seoTitle: p.seoTitle,
@@ -516,6 +534,11 @@ router.get("/org", async (req, res) => {
           accentColor: org.website?.accentColor || "#2563eb",
           headerLayout: org.website?.headerLayout || "left",
           published: org.website?.published === true,
+          homepage: {
+            sections: Array.isArray(org.website?.homepage?.sections)
+              ? org.website.homepage.sections
+              : [],
+          },
         },
         location: locationSummary,
         deliveryCategories,
