@@ -458,6 +458,8 @@ router.patch("/:id/receipt", verifyToken, async (req, res) => {
 
     // Boolean toggles
     const toggles = [
+      "showReceiptTitle",
+      "showOrganizationName",
       "showLocationName",
       "showLocationAddress",
       "showLocationPhone",
@@ -467,6 +469,7 @@ router.patch("/:id/receipt", verifyToken, async (req, res) => {
       "showNotes",
       "showDeliveryBlock",
     ];
+
     for (const key of toggles) {
       if (req.body[key] !== undefined) {
         if (typeof req.body[key] !== "boolean") {

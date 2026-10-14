@@ -82,7 +82,8 @@ const locationSchema = new Schema(
       thankYouLine: { type: String, default: "Thank you for your purchase!" },
       termsLine: { type: String, default: "" },
 
-      // Section toggles
+      showReceiptTitle: { type: Boolean, default: true },
+      showOrganizationName: { type: Boolean, default: true },
       showLocationName: { type: Boolean, default: true },
       showLocationAddress: { type: Boolean, default: true },
       showLocationPhone: { type: Boolean, default: true },
@@ -92,7 +93,6 @@ const locationSchema = new Schema(
       showNotes: { type: Boolean, default: true },
       showDeliveryBlock: { type: Boolean, default: true },
 
-      // Optional custom text for specific slots
       customTaxIdLabel: { type: String, default: "Tax ID" },
     },
 
