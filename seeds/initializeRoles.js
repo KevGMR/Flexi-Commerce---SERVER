@@ -10,6 +10,7 @@ const Role = require("../models/Role");
 const { PERMISSIONS, ROLE_PERMISSIONS } = require("../config/permissions");
 
 const MONGO_URI = process.env.MONGO_URI;
+const PROD_MONGO_URI = process.env.PROD_MONGO_URI;
 
 if (!MONGO_URI) {
   console.error("❌ MONGO_URI not set in .env file");
@@ -18,7 +19,7 @@ if (!MONGO_URI) {
 
 async function initializeRoles() {
   try {
-    await mongoose.connect(MONGO_URI);
+    await mongoose.connect(PROD_MONGO_URI);
     console.log("✓ Connected to MongoDB");
 
     // Define default system roles with their permissions
@@ -45,6 +46,12 @@ async function initializeRoles() {
         name: "Employee",
         description: "View-only access to system",
         permissions: ROLE_PERMISSIONS.Employee,
+        isSystem: true,
+      },
+      {
+        name: "Attendant",
+        description: "Self-service view of their own commission earnings",
+        permissions: ROLE_PERMISSIONS.Attendant,
         isSystem: true,
       },
     ];
@@ -81,3 +88,4 @@ async function initializeRoles() {
 }
 
 initializeRoles();
+

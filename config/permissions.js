@@ -23,6 +23,8 @@ const PERMISSIONS = {
   VIEW_REPORTS: "view_reports",
   EXPORT_REPORTS: "export_reports",
   VIEW_FINANCIAL_REPORTS: "view_financial_reports",
+  // Attendant self-service
+  VIEW_OWN_COMMISSIONS: "view_own_commissions",
 
   // Finance Permissions
   MANAGE_FINANCE: "manage_finance",
@@ -217,6 +219,9 @@ const ROLE_PERMISSIONS = {
     // Delivery Fees (limited)
     PERMISSIONS.DELIVERY_FEES_CREATE,
     PERMISSIONS.DELIVERY_FEES_READ,
+
+    // Self-service commissions
+    PERMISSIONS.VIEW_OWN_COMMISSIONS,
   ],
   
   Employee: [
@@ -227,6 +232,10 @@ const ROLE_PERMISSIONS = {
     // Delivery Fees (view only for potential driver role)
     PERMISSIONS.DELIVERY_FEES_READ,
     PERMISSIONS.DELIVERY_FEES_UPDATE_STATUS,
+    PERMISSIONS.VIEW_OWN_COMMISSIONS,
+  ],
+  Attendant: [
+    PERMISSIONS.VIEW_OWN_COMMISSIONS,
   ],
 };
 
@@ -288,6 +297,9 @@ const PERMISSION_GROUPS = {
   // NEW: Backdate Sales Group
   backdate: [
     PERMISSIONS.BACKDATE_SALES,
+  ],
+    attendant: [
+    PERMISSIONS.VIEW_OWN_COMMISSIONS,
   ],
 };
 
