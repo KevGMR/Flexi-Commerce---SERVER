@@ -56,12 +56,19 @@ const organizationSchema = new Schema(
         default: "left",
       },
 
+      // Site-wide announcement bar (renders above the header on every page)
+      announcement: {
+        text: { type: String, default: "" },
+        href: { type: String, default: "" },
+        isActive: { type: Boolean, default: true },
+      },
+
       // NEW — homepage builder
       homepage: {
         sections: {
           type: [
             {
-              _id: false,                 // no Mongo-generated _id; client sends its own
+              _id: false,
               id: { type: String, required: true },
               type: {
                 type: String,
@@ -75,6 +82,7 @@ const organizationSchema = new Schema(
                   "banner",
                   "featured-category",
                   "image-text",
+                  "announcement",
                 ],
               },
               config: { type: mongoose.Schema.Types.Mixed, default: {} },

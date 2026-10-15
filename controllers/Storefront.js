@@ -464,6 +464,7 @@ router.get("/collections/:slug", async (req, res) => {
   }
 });
 
+
 // ---------------------------------------------------------------------------
 // Organization lookup by slug (used by storefront server components to
 // fetch org settings like name, currency, theme)
@@ -472,7 +473,6 @@ router.get("/org", async (req, res) => {
   try {
     const org = req.storefrontOrg;
 
-    // Resolve the location the storefront uses for delivery options
     const locationId = await resolveLocationId(req, org);
 
     let deliveryCategories = [];
@@ -516,6 +516,8 @@ router.get("/org", async (req, res) => {
       }
     }
 
+    const ann = org.website?.announcement || {};
+
     return res.status(200).json({
       organization: {
         id: org._id,
@@ -534,6 +536,11 @@ router.get("/org", async (req, res) => {
           accentColor: org.website?.accentColor || "#2563eb",
           headerLayout: org.website?.headerLayout || "left",
           published: org.website?.published === true,
+          announcement: {
+            text: ann.text || null,
+            href: ann.href || null,
+            isActive: ann.isActive !== false,
+          },
           homepage: {
             sections: Array.isArray(org.website?.homepage?.sections)
               ? org.website.homepage.sections

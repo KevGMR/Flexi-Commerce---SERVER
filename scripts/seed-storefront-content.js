@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Seed storefront content (products, variants, collections, homepage sections)
- * for FLEXI-POS live tenants.
+ * Seed storefront content (products, variants, collections, homepage sections,
+ * site-wide announcement) for FLEXI-POS live tenants.
  *
  * Idempotent: every doc uses a "seed-" prefixed handle/slug and a
  * `source: "seed"` marker. Re-running updates in place. `--clean` wipes
@@ -15,11 +15,13 @@
  *   node scripts/seed-storefront-content.js --apply --org=styledke
  */
 
-const dns = require("dns");
-dns.setServers(["8.8.8.8", "1.1.1.1"]);
 
 require("dotenv").config();
 const mongoose = require("mongoose");
+
+
+const dns = require("dns");
+dns.setServers(["8.8.8.8", "1.1.1.1"]);
 
 const APPLY = process.argv.includes("--apply");
 const CLEAN = process.argv.includes("--clean");
@@ -40,7 +42,7 @@ if (isLocal && !process.argv.includes("--force-local")) {
 }
 
 // ---------------------------------------------------------------------------
-// Image bank (Unsplash — hotlinkable, real, seed-only)
+// Image bank
 // ---------------------------------------------------------------------------
 
 const IMG = {
@@ -74,6 +76,11 @@ const PLANS = {
   "house-of-queens": {
     skuPrefix: "HOQ",
     currency: "KES",
+    announcement: {
+      text: "Free delivery in Nairobi on orders over KES 5,000",
+      href: "/shipping",
+      isActive: true,
+    },
     products: [
       { handle: "seed-body-wave-lace-front", name: "Body Wave Lace Front Wig", price: 18500, compareAt: 22000, productType: "Wigs", vendor: "House of Queens", tags: ["wigs", "lace-front", "body-wave"], images: [IMG.wig1, IMG.wig2, IMG.wig3], hover: IMG.wig2, options: { name: "Length", values: ['18"', '20"', '22"', '24"'] } },
       { handle: "seed-deep-curly-bundle", name: "Deep Curly Bundle Deal", price: 12400, compareAt: 15000, productType: "Bundles", vendor: "House of Queens", tags: ["bundles", "curly"], images: [IMG.wig2, IMG.wig4], hover: IMG.wig4, options: { name: "Length", values: ['16"', '18"', '20"'] } },
@@ -90,12 +97,12 @@ const PLANS = {
       { slug: "seed-accessories", name: "Accessories", description: "Everything else you need.", image: IMG.beauty3, products: ["seed-edge-control-gel", "seed-wig-cap", "seed-silk-bonnet"] },
     ],
     sections: [
+      { type: "announcement", config: { text: "Studio open Sat 10am–4pm — walk-ins welcome", href: "/contact", tone: "muted" } },
       { type: "hero", config: { heading: "Crown yourself", subheading: "Premium wigs, bundles, and accessories — delivered across Kenya.", ctaLabel: "Shop wigs", ctaHref: "/products", imageUrl: IMG.hero1, align: "left" } },
-      { type: "trust-strip", config: { items: [ { title: "Fast delivery", body: "Same-day in Nairobi" }, { title: "Secure M-Pesa", body: "Pay safely at checkout" }, { title: "Real hair", body: "100% virgin human hair" } ] } },
       { type: "featured-category", config: { heading: "Shop by category", subheading: "Find your next look", categorySlugs: ["seed-wigs", "seed-bundles", "seed-accessories"] } },
       { type: "featured-products", config: { heading: "Bestsellers", subheading: "What everyone is loving", mode: "latest", productIds: [], limit: 8 } },
       { type: "image-text", config: { heading: "Quality you can feel", subheading: "Our promise", body: "Every unit is hand-selected and inspected before it ships.\nWe only sell hair we would wear ourselves.", imageUrl: IMG.lifestyle1, imagePosition: "left", ctaLabel: "Read our story", ctaHref: "/about" } },
-      { type: "banner", config: { imageUrl: IMG.banner1, href: "/collections", alt: "Sale banner" } },
+      { type: "banner", config: { imageUrl: IMG.banner1, href: "/collections", alt: "Sale banner", heading: "Seasonal sale", subheading: "Limited time", ctaLabel: "Shop the edit", ctaHref: "/collections" } },
       { type: "collection", config: { heading: "New arrivals", subheading: "Fresh in this week", collectionSlug: "seed-wigs", limit: 4 } },
       { type: "rich-text", config: { heading: "Visit our studio", body: "Walk in for a fitting at our Nairobi studio, or order online and we'll deliver to your door." } },
     ],
@@ -104,6 +111,11 @@ const PLANS = {
   styledke: {
     skuPrefix: "SK",
     currency: "KES",
+    announcement: {
+      text: "New arrivals every Friday — 10% off first order with code STYLE10",
+      href: "/collections",
+      isActive: true,
+    },
     products: [
       { handle: "seed-linen-shirt", name: "Relaxed Linen Shirt", price: 3800, compareAt: 4500, productType: "Shirts", vendor: "StyledKE", tags: ["shirts", "linen"], images: [IMG.apparel1, IMG.apparel2], hover: IMG.apparel2, options: { name: "Size", values: ["S", "M", "L", "XL"] } },
       { handle: "seed-wide-leg-trouser", name: "Wide-Leg Trouser", price: 4200, productType: "Trousers", vendor: "StyledKE", tags: ["trousers"], images: [IMG.apparel3, IMG.apparel4], hover: IMG.apparel4, options: { name: "Size", values: ["28", "30", "32", "34"] } },
@@ -120,12 +132,12 @@ const PLANS = {
       { slug: "seed-outerwear", name: "Outerwear", description: "Layer up.", image: IMG.apparel2, products: ["seed-denim-jacket"] },
     ],
     sections: [
+      { type: "announcement", config: { text: "Free returns within 7 days", href: "/returns", tone: "muted" } },
       { type: "hero", config: { heading: "Wear it your way", subheading: "Contemporary Kenyan fashion, delivered.", ctaLabel: "Shop new in", ctaHref: "/products", imageUrl: IMG.hero2, align: "left" } },
-      { type: "trust-strip", config: { items: [ { title: "Free returns", body: "Within 7 days" }, { title: "M-Pesa", body: "Pay at checkout" }, { title: "Nairobi-made", body: "Local designers" } ] } },
       { type: "featured-category", config: { heading: "Browse", subheading: "Pick a category", categorySlugs: ["seed-new-in", "seed-essentials", "seed-outerwear"] } },
       { type: "featured-products", config: { heading: "Trending now", subheading: "", mode: "latest", productIds: [], limit: 8 } },
       { type: "image-text", config: { heading: "Made in Nairobi", subheading: "Our story", body: "We work with local designers and small ateliers to bring you pieces that last.", imageUrl: IMG.lifestyle2, imagePosition: "right", ctaLabel: "About us", ctaHref: "/about" } },
-      { type: "banner", config: { imageUrl: IMG.banner2, href: "/collections", alt: "Seasonal banner" } },
+      { type: "banner", config: { imageUrl: IMG.banner2, href: "/collections", alt: "Seasonal banner", heading: "New season", subheading: "Just dropped", ctaLabel: "Shop now", ctaHref: "/collections" } },
       { type: "collection", config: { heading: "New this week", collectionSlug: "seed-new-in", limit: 4 } },
       { type: "rich-text", config: { heading: "Delivery across Kenya", body: "Nairobi same-day. Countrywide 2–3 days via courier." } },
     ],
@@ -137,17 +149,20 @@ const PLANS = {
 // ---------------------------------------------------------------------------
 
 const newId = () => new mongoose.Types.ObjectId();
-const slugVariant = (s) => (s || "default").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+const slugVariant = (s) =>
+  (s || "default")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
 
-function buildImages(urls, hoverUrl) {
+function buildImages(urls) {
   if (!Array.isArray(urls) || urls.length === 0) return [];
-  const out = [];
-  // First image is default. Hover image (if different) becomes a second
-  // non-default image so it survives the round-trip through the API.
-  urls.forEach((url, i) => {
-    out.push({ url, alt: "", isDefault: i === 0, pendingUpload: false });
-  });
-  return out;
+  return urls.map((url, i) => ({
+    url,
+    alt: "",
+    isDefault: i === 0,
+    pendingUpload: false,
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -176,7 +191,6 @@ async function upsertProduct({ db, orgId, currency, spec, seq, skuPrefix }) {
   });
   const _id = existing?._id || newId();
   const sku = `${skuPrefix}-SEED-${String(seq).padStart(3, "0")}`;
-  const cost = Math.round(spec.price * 0.4);
 
   const doc = {
     _id,
@@ -195,15 +209,15 @@ async function upsertProduct({ db, orgId, currency, spec, seq, skuPrefix }) {
     publishedAt: existing?.publishedAt || new Date(),
     price: spec.price,
     compareAtPrice: spec.compareAt ?? null,
-    cost,
+    cost: Math.round(spec.price * 0.4),
     currency,
     weight: 0,
     weightUnit: "kg",
-    trackInventory: true,
+    trackInventory: false,
     options: spec.options
       ? [{ name: spec.options.name, position: 0, values: spec.options.values }]
       : [],
-    images: buildImages(spec.images, spec.hover),
+    images: buildImages(spec.images),
     metafields: [],
     metafieldDefinitions: [],
     migrationFlags: [],
@@ -247,12 +261,12 @@ async function upsertVariants({ db, orgId, product, spec }) {
       cost: Math.round(spec.price * 0.4),
       weight: 0,
       weightUnit: "kg",
-      images: buildImages(spec.images, spec.hover).slice(0, 1),
+      images: buildImages(spec.images).slice(0, 1),
       metafields: [],
       position: i,
       status: "active",
-      trackInventory: true,
-      continueSellingWhenOutOfStock: false,
+      trackInventory: false,
+      continueSellingWhenOutOfStock: true,
       source: "seed",
       updatedAt: new Date(),
       createdAt: existing?.createdAt || new Date(),
@@ -304,7 +318,11 @@ async function upsertCollection({ db, orgId, spec, productIdByHandle }) {
   return { _id, productIds };
 }
 
-async function backfillProductCollectionIds({ db, orgId, collectionsByProductId }) {
+async function backfillProductCollectionIds({
+  db,
+  orgId,
+  collectionsByProductId,
+}) {
   const products = db.collection("products");
   for (const [productId, collectionIds] of collectionsByProductId.entries()) {
     if (APPLY) {
@@ -316,9 +334,9 @@ async function backfillProductCollectionIds({ db, orgId, collectionsByProductId 
   }
 }
 
-async function setHomepageSections({ db, orgId, sections }) {
+async function setWebsiteContent({ db, orgId, plan }) {
   const orgs = db.collection("organizations");
-  const withIds = sections.map((s) => ({
+  const withIds = plan.sections.map((s) => ({
     id: `seed-${s.type}-${Math.random().toString(36).slice(2, 8)}`,
     type: s.type,
     config: s.config || {},
@@ -330,12 +348,17 @@ async function setHomepageSections({ db, orgId, sections }) {
       {
         $set: {
           "website.homepage.sections": withIds,
+          "website.announcement": {
+            text: plan.announcement?.text || "",
+            href: plan.announcement?.href || "",
+            isActive: plan.announcement?.isActive !== false,
+          },
           updatedAt: new Date(),
         },
       },
     );
   }
-  return withIds.length;
+  return { sections: withIds.length, announcement: Boolean(plan.announcement?.text) };
 }
 
 // ---------------------------------------------------------------------------
@@ -343,11 +366,17 @@ async function setHomepageSections({ db, orgId, sections }) {
 // ---------------------------------------------------------------------------
 
 (async () => {
-  console.log(`Mode:  ${APPLY ? "APPLY (writing)" : "DRY RUN (no writes)"}${CLEAN ? " + CLEAN" : ""}`);
+  console.log(
+    `Mode:  ${APPLY ? "APPLY (writing)" : "DRY RUN (no writes)"}${CLEAN ? " + CLEAN" : ""}`,
+  );
   console.log(`URI:   ${isLocal ? "LOCAL" : "REMOTE (prod)"}`);
   console.log(`Orgs:  ${ORG_FILTER || "house-of-queens, styledke"}\n`);
 
-  await mongoose.connect(uri);
+  await mongoose.connect(uri, {
+    tls: true,
+    ssl: true,
+    family: 4 
+  });
   const db = mongoose.connection.db;
   const orgs = db.collection("organizations");
 
@@ -420,12 +449,14 @@ async function setHomepageSections({ db, orgId, sections }) {
       collectionsByProductId,
     });
 
-    const n = await setHomepageSections({
+    const result = await setWebsiteContent({
       db,
       orgId: org._id,
-      sections: plan.sections,
+      plan,
     });
-    console.log(`    sections ${n} written\n`);
+    console.log(
+      `    sections ${result.sections} written  announcement=${result.announcement ? "yes" : "no"}\n`,
+    );
   }
 
   await mongoose.disconnect();
