@@ -70,7 +70,9 @@ const tokenAuditLogSchema = new Schema(
         "user_permissions_synced",
         "backdate_applied",
         "backdate_rolled_back",
-        "image_uploaded"
+        "image_uploaded",
+        "domain_added",
+        "domain_removed"
       ],
     },
     permission: {
