@@ -68,7 +68,7 @@ const collectionSchema = new Schema(
     },
     published: {
       type: Boolean,
-      default: false,
+      default: true,
     },
     publishedAt: Date,
   },
