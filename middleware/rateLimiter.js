@@ -1,23 +1,70 @@
 const rateLimit = require("express-rate-limit");
 
 /**
- * Strict rate limiter for login endpoint
- * 5 attempts per 15 minutes per IP
+ * Login rate limiter — IP + email scoped.
+ *
+ * Rationale:
+ *   Multiple attendants behind one office NAT share the same IP. A per-IP
+ *   limiter locks out the whole team after a handful of logins.
+ *
+ * This limiter:
+ *   - Keys by (IP, email) so two attendants with different emails have
+ *     independent budgets.
+ *   - Skips successful requests, so a busy office with correct passwords
+ *     never trips the limit.
+ *   - Allows 20 attempts per (IP, email) per 15 minutes. Enough for typos,
+ *     not enough for a brute-force from one source.
  */
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 5,
+  max: 20,
   message: {
     error: "Too many login attempts. Please try again in 15 minutes.",
     code: "RATE_LIMIT_EXCEEDED",
   },
   standardHeaders: true,
   legacyHeaders: false,
-  skipSuccessfulRequests: false,
+  skipSuccessfulRequests: true, // successful logins don't count
+  keyGenerator: (req) => {
+    const ip = req.ip || req.socket?.remoteAddress || "unknown";
+    const email = (req.body?.email || "").toLowerCase().trim();
+    return `${ip}:${email || "no-email"}`;
+  },
   handler: (req, res) => {
     res.status(429).json({
       error: "Too many login attempts. Please try again in 15 minutes.",
       code: "RATE_LIMIT_EXCEEDED",
+      retryAfter: req.rateLimit.resetTime,
+    });
+  },
+});
+
+/**
+ * Email-scoped login limiter — brute-force protection for a single account.
+ *
+ * Runs alongside loginLimiter. Even if an attacker rotates source IPs, they
+ * can't exceed 10 failed attempts against one email in 15 minutes.
+ *
+ * Successful logins don't count — a legit user with a typo can retry.
+ */
+const loginEmailLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: {
+    error: "Too many failed attempts for this account. Try again in 15 minutes.",
+    code: "EMAIL_RATE_LIMIT_EXCEEDED",
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+  keyGenerator: (req) => {
+    const email = (req.body?.email || "").toLowerCase().trim();
+    return email || `ip:${req.ip || req.socket?.remoteAddress || "unknown"}`;
+  },
+  handler: (req, res) => {
+    res.status(429).json({
+      error: "Too many failed attempts for this account. Try again in 15 minutes.",
+      code: "EMAIL_RATE_LIMIT_EXCEEDED",
       retryAfter: req.rateLimit.resetTime,
     });
   },
@@ -99,9 +146,6 @@ const apiLimiter = rateLimit({
 /**
  * Public storefront rate limiter
  * 300 requests per 15 minutes per IP
- *
- * Higher than apiLimiter because a single visitor browsing product pages
- * legitimately makes many requests. Still bounded to prevent scraping.
  */
 const storefrontLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -147,6 +191,7 @@ const passwordResetLimiter = rateLimit({
 
 module.exports = {
   loginLimiter,
+  loginEmailLimiter,
   registrationLimiter,
   refreshLimiter,
   apiLimiter,

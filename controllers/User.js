@@ -16,7 +16,7 @@ const { logTokenEvent, logFailedAuth, revokeAllUserTokens } = require("../servic
 const { sendEmailVerification, sendPasswordReset, sendOrganizationInvitation } = require("../services/emailNotifier");
 const { verifyToken, verifyRefreshTokenMiddleware, extractDeviceId, requireOrganization } = require("../middleware/auth");
 const { checkUserStatus } = require("../middleware/userStatusCheck");
-const { loginLimiter, registrationLimiter, refreshLimiter, passwordResetLimiter } = require("../middleware/rateLimiter");
+const { loginLimiter, loginEmailLimiter, registrationLimiter, refreshLimiter, passwordResetLimiter } = require("../middleware/rateLimiter");
 const { getEffectivePermissionsForMembership, getMembershipPermissionsForRole, syncRoleWithConfig } = require("../utils/effectivePermissions");
 const { requirePermission } = require("../middleware/permissionCheck");
 
@@ -241,7 +241,7 @@ router.post("/new", registrationLimiter, async (req, res) => {
  * Login user - returns organizations or issues org-scoped token
  * POST /users/login
  */
-router.post("/login", loginLimiter, extractDeviceId, async (req, res) => {
+router.post("/login", loginLimiter, loginEmailLimiter, extractDeviceId, async (req, res) => {
   try {
     const { email, password, organizationId } = req.body;
 
