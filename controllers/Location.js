@@ -378,6 +378,8 @@ router.patch("/:id/receipt", verifyToken, async (req, res) => {
       showNotes,
       showDeliveryBlock,
       customTaxIdLabel,
+      locationNameMaxWords,
+      locationAddressMaxWords,
     } = req.body || {};
 
     const location = await Location.findOne({ _id: id, organizationId });
@@ -429,6 +431,27 @@ router.patch("/:id/receipt", verifyToken, async (req, res) => {
           .json({ error: "customTaxIdLabel must be a string" });
       }
       r.customTaxIdLabel = v;
+    }
+
+    // Numeric word-clamp fields
+    const numField = (name, value) => {
+      const n = Number(value);
+      if (!Number.isFinite(n) || n < 0 || n > 50) {
+        return { ok: false, error: `${name} must be a number between 0 and 50` };
+      }
+      return { ok: true, value: Math.floor(n) };
+    };
+
+    if (locationNameMaxWords !== undefined) {
+      const r2 = numField("locationNameMaxWords", locationNameMaxWords);
+      if (!r2.ok) return res.status(400).json({ error: r2.error });
+      r.locationNameMaxWords = r2.value;
+    }
+
+    if (locationAddressMaxWords !== undefined) {
+      const r2 = numField("locationAddressMaxWords", locationAddressMaxWords);
+      if (!r2.ok) return res.status(400).json({ error: r2.error });
+      r.locationAddressMaxWords = r2.value;
     }
 
     // Array fields

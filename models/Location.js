@@ -94,6 +94,9 @@ const locationSchema = new Schema(
       showDeliveryBlock: { type: Boolean, default: true },
 
       customTaxIdLabel: { type: String, default: "Tax ID" },
+
+      locationNameMaxWords: { type: Number, default: 0, min: 0, max: 50 },
+      locationAddressMaxWords: { type: Number, default: 0, min: 0, max: 50 },
     },
 
     // Delivery fee settings (legacy - kept for backward compatibility)
