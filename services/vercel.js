@@ -84,6 +84,7 @@ async function addDomain(domain) {
       `/v10/projects/${projectId}/domains`,
       { name: domain },
     );
+    console.log("Vercel API Response:", JSON.stringify(res.data, null, 2));
     return normalizeDomain(res.data, domain);
   } catch (err) {
     // 409 = already exists on the project; treat as success and fetch state
