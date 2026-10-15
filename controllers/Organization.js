@@ -25,6 +25,7 @@ const HOMEPAGE_SECTION_TYPES = [
   "banner",
   "featured-category",
   "image-text",
+  "announcement",
 ];
 /**
  * Validate the homepage.sections array. Returns { ok: true, sections } on
@@ -199,6 +200,20 @@ function validateSectionConfig(type, config, i) {
           imagePosition: position,
           ctaLabel: str(config.ctaLabel, 40),
           ctaHref: str(config.ctaHref, 300),
+        },
+      };
+    }
+
+    case "announcement": {
+      const tone = ["brand", "ink", "muted"].includes(config.tone)
+        ? config.tone
+        : "muted";
+      return {
+        ok: true,
+        config: {
+          text: str(config.text, 200),
+          href: str(config.href, 300),
+          tone,
         },
       };
     }
