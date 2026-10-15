@@ -355,6 +355,7 @@ router.put("/:organizationId", verifyToken, async (req, res) => {
         "accentColor",
         "headerLayout",
         "homepage",
+        "announcement",
       ];
 
       const nextWebsite = { ...current };
@@ -371,6 +372,27 @@ router.put("/:organizationId", verifyToken, async (req, res) => {
           return res.status(400).json({ error: sectionsResult.error });
         }
         nextWebsite.homepage = { sections: sectionsResult.sections };
+      }
+
+      // Site-wide announcement validation
+      if (website.announcement !== undefined) {
+        const raw = website.announcement || {};
+        const text =
+          typeof raw.text === "string" ? raw.text.slice(0, 200).trim() : "";
+        const href =
+          typeof raw.href === "string" ? raw.href.slice(0, 300).trim() : "";
+        // Allow empty href; if non-empty, must start with / or http(s)://
+        if (href && !/^\/|^https?:\/\//.test(href)) {
+          return res.status(400).json({
+            error:
+              "announcement.href must start with '/' or 'http://' or 'https://'",
+          });
+        }
+        nextWebsite.announcement = {
+          text,
+          href,
+          isActive: raw.isActive !== false,
+        };
       }
 
       // Validate color hex if provided
