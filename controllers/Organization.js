@@ -13,6 +13,8 @@ const { getEffectivePermissionsForMembership, getMembershipPermissionsForRole } 
 const { logTokenEvent } = require("../services/auditLogger");
 const { sendOrganizationInvitation } = require("../services/emailNotifier");
 const { loginLimiter } = require("../middleware/rateLimiter");
+const vercel = require("../services/vercel");
+
 
 const VALID_TAX_MODES = ["inclusive", "exclusive"];
 
@@ -347,6 +349,7 @@ router.put("/:organizationId", verifyToken, async (req, res) => {
         "subdomain",
         "domain",
         "domainVerified",
+        "domainVerification",
         "published",
         "logoUrl",
         "faviconUrl",
@@ -476,6 +479,300 @@ router.put("/:organizationId", verifyToken, async (req, res) => {
     return res.status(500).json({ error: "Failed to update organization" });
   }
 });
+
+/**
+ * Add a custom domain via Vercel.
+ * POST /organizations/:organizationId/website/domain
+ * Body: { domain: "shop.example.com" }
+ *
+ * On Vercel success: saves website.domain + DNS hints, domainVerified=false.
+ * On Vercel failure: still saves website.domain so the user can configure
+ *   manually, and surfaces the error alongside DNS hints we can compute
+ *   locally.
+ */
+router.post("/:organizationId/website/domain", verifyToken, async (req, res) => {
+  try {
+    const { domain } = req.body || {};
+
+    const membership = await UserOrganization.findOne({
+      userId: req.user.userId,
+      organizationId: req.params.organizationId,
+    }).lean();
+
+    if (!membership || !["Owner", "Manager"].includes(membership.role)) {
+      return res.status(403).json({
+        error: "Only Owner or Manager can manage domains",
+      });
+    }
+
+    const clean = String(domain || "").toLowerCase().trim();
+    if (!clean) {
+      return res.status(400).json({ error: "domain is required" });
+    }
+    if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(clean)) {
+      return res.status(400).json({ error: "domain is not a valid hostname" });
+    }
+    if (clean.endsWith("flexisolutions.tech")) {
+      return res.status(400).json({
+        error:
+          "Use the Subdomain field for *.flexisolutions.tech — the custom domain field is for external domains.",
+      });
+    }
+    if (clean.endsWith(".vercel.app")) {
+      return res.status(400).json({
+        error: "vercel.app hostnames cannot be attached as custom domains.",
+      });
+    }
+
+    const org = await Organization.findById(req.params.organizationId);
+    if (!org) {
+      return res.status(404).json({ error: "Organization not found" });
+    }
+
+    // Guard against another org already owning this domain
+    const conflict = await Organization.findOne({
+      "website.domain": clean,
+      _id: { $ne: org._id },
+    })
+      .select("_id name website.subdomain")
+      .lean();
+    if (conflict) {
+      return res.status(409).json({
+        error: "That domain is already attached to another organization",
+      });
+    }
+
+    let vercelState = null;
+    let vercelError = null;
+
+    if (vercel.isConfigured()) {
+      try {
+        vercelState = await vercel.addDomain(clean);
+      } catch (err) {
+        vercelError = err.message || "Vercel API error";
+        console.error("[domains] Vercel addDomain failed:", vercelError);
+      }
+    } else {
+      vercelError =
+        "Vercel integration not configured on the server. Set VERCEL_API_TOKEN and STOREFRONT_PROJECT_ID, or configure the domain manually.";
+    }
+
+    // Merge the domain into the existing website doc
+    const current = org.website || {};
+    const nextWebsite = { ...current };
+    nextWebsite.domain = clean;
+    nextWebsite.domainVerified = vercelState?.verified === true;
+
+    if (vercelState) {
+      const txt = (vercelState.verification || []).find(
+        (v) => v.type === "TXT",
+      );
+      nextWebsite.domainVerification = {
+        txtName: txt?.domain || "",
+        txtValue: txt?.value || "",
+        cnameTarget: vercelState.cnameTarget || "",
+        lastCheckedAt: new Date(),
+        error: "",
+      };
+    } else {
+      // Manual fallback — we can't ask Vercel for the exact TXT challenge.
+      // Provide the well-known verification CNAME target so the customer
+      // can at least point DNS correctly; verification will require an
+      // admin follow-up once Vercel is configured.
+      nextWebsite.domainVerification = {
+        txtName: "",
+        txtValue: "",
+        cnameTarget: "cname.vercel-dns-0.com",
+        lastCheckedAt: new Date(),
+        error: vercelError || "",
+      };
+    }
+
+    const updated = await Organization.findByIdAndUpdate(
+      req.params.organizationId,
+      { website: nextWebsite },
+      { new: true, runValidators: true },
+    );
+
+    await logTokenEvent(
+      req.user.userId,
+      req.params.organizationId,
+      "domain_added",
+      req.ip,
+      req.get("user-agent"),
+      { details: `Added domain ${clean}${vercelError ? " (manual fallback)" : ""}` },
+    );
+
+    return res.status(200).json({
+      message: vercelError
+        ? "Domain saved. Configure DNS manually — automatic verification is unavailable."
+        : "Domain added. Configure DNS to complete verification.",
+      organization: updated,
+      vercelError,
+    });
+  } catch (error) {
+    console.error("Error adding domain:", error);
+    return res.status(500).json({ error: "Failed to add domain" });
+  }
+});
+
+/**
+ * Check verification status against Vercel.
+ * GET /organizations/:organizationId/website/domain/status
+ */
+router.get(
+  "/:organizationId/website/domain/status",
+  verifyToken,
+  async (req, res) => {
+    try {
+      const membership = await UserOrganization.findOne({
+        userId: req.user.userId,
+        organizationId: req.params.organizationId,
+      }).lean();
+      if (!membership) {
+        return res.status(403).json({ error: "No access to this organization" });
+      }
+
+      const org = await Organization.findById(req.params.organizationId);
+      if (!org) {
+        return res.status(404).json({ error: "Organization not found" });
+      }
+
+      const domain = org.website?.domain;
+      if (!domain) {
+        return res.status(400).json({ error: "No custom domain set" });
+      }
+
+      if (!vercel.isConfigured()) {
+        return res.status(200).json({
+          verified: false,
+          error: "Vercel integration not configured on the server.",
+          domainVerification: org.website?.domainVerification || null,
+        });
+      }
+
+      let state;
+      try {
+        state = await vercel.verifyDomain(domain);
+      } catch (err) {
+        return res.status(502).json({
+          error: err.message || "Failed to check domain status with Vercel",
+        });
+      }
+
+      const current = org.website || {};
+      const nextWebsite = { ...current };
+      nextWebsite.domainVerified = state.verified === true;
+      const txt = (state.verification || []).find((v) => v.type === "TXT");
+      nextWebsite.domainVerification = {
+        txtName: txt?.domain || current.domainVerification?.txtName || "",
+        txtValue: txt?.value || current.domainVerification?.txtValue || "",
+        cnameTarget:
+          state.cnameTarget ||
+          current.domainVerification?.cnameTarget ||
+          "cname.vercel-dns-0.com",
+        lastCheckedAt: new Date(),
+        error: state.error || "",
+      };
+
+      await Organization.findByIdAndUpdate(
+        req.params.organizationId,
+        { website: nextWebsite },
+        { runValidators: true },
+      );
+
+      return res.status(200).json({
+        verified: state.verified === true,
+        domainVerification: nextWebsite.domainVerification,
+      });
+    } catch (error) {
+      console.error("Error checking domain status:", error);
+      return res.status(500).json({ error: "Failed to check domain status" });
+    }
+  },
+);
+
+/**
+ * Remove the custom domain.
+ * DELETE /organizations/:organizationId/website/domain
+ */
+router.delete(
+  "/:organizationId/website/domain",
+  verifyToken,
+  async (req, res) => {
+    try {
+      const membership = await UserOrganization.findOne({
+        userId: req.user.userId,
+        organizationId: req.params.organizationId,
+      }).lean();
+      if (!membership || !["Owner", "Manager"].includes(membership.role)) {
+        return res
+          .status(403)
+          .json({ error: "Only Owner or Manager can remove domains" });
+      }
+
+      const org = await Organization.findById(req.params.organizationId);
+      if (!org) {
+        return res.status(404).json({ error: "Organization not found" });
+      }
+
+      const domain = org.website?.domain;
+      if (!domain) {
+        return res.status(400).json({ error: "No custom domain to remove" });
+      }
+
+      let vercelError = null;
+      if (vercel.isConfigured()) {
+        try {
+          await vercel.removeDomain(domain);
+        } catch (err) {
+          vercelError = err.message || "Vercel API error";
+          console.error("[domains] Vercel removeDomain failed:", vercelError);
+        }
+      }
+
+      const current = org.website || {};
+      const nextWebsite = {
+        ...current,
+        domain: "",
+        domainVerified: false,
+        domainVerification: {
+          txtName: "",
+          txtValue: "",
+          cnameTarget: "",
+          lastCheckedAt: null,
+          error: "",
+        },
+      };
+
+      const updated = await Organization.findByIdAndUpdate(
+        req.params.organizationId,
+        { website: nextWebsite },
+        { new: true, runValidators: true },
+      );
+
+      await logTokenEvent(
+        req.user.userId,
+        req.params.organizationId,
+        "domain_removed",
+        req.ip,
+        req.get("user-agent"),
+        { details: `Removed domain ${domain}` },
+      );
+
+      return res.status(200).json({
+        message: vercelError
+          ? "Domain removed locally, but Vercel API call failed. Remove it from the Vercel dashboard manually."
+          : "Domain removed.",
+        organization: updated,
+        vercelError,
+      });
+    } catch (error) {
+      console.error("Error removing domain:", error);
+      return res.status(500).json({ error: "Failed to remove domain" });
+    }
+  },
+);
 
 /**
  * Invite user to organization

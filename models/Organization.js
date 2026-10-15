@@ -43,6 +43,13 @@ const organizationSchema = new Schema(
       domain: { type: String, lowercase: true, trim: true },
       subdomain: { type: String, lowercase: true, trim: true },
       domainVerified: { type: Boolean, default: false },
+      domainVerification: {
+        txtName: { type: String, default: "" },
+        txtValue: { type: String, default: "" },
+        cnameTarget: { type: String, default: "" },
+        lastCheckedAt: { type: Date, default: null },
+        error: { type: String, default: "" },
+      },
       published: { type: Boolean, default: false },
 
       logoUrl: String,
