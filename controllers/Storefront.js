@@ -595,7 +595,6 @@ router.get("/org", async (req, res) => {
         },
         location: locationSummary,
         deliveryCategories,
-        paymentMethods,
         mpesaStkAvailable,
       },
     });
