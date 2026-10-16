@@ -3635,19 +3635,25 @@ router.post("/:id/refund", requirePermission("refund_sale"), refundSale);
  * Body: { phone: string }
  */
 const startMpesaStk = async (req, res) => {
+  const tag = "[POS STK]";
   try {
     const { organizationId, userId, role } = req.user;
     const { id } = req.params;
     const { phone } = req.body || {};
 
+    console.log(tag, "start", { saleId: id, phone, orgId: String(organizationId) });
+
     if (!phone) {
+      console.warn(tag, "missing phone");
       return res.status(400).json({ success: false, message: "phone is required" });
     }
 
     const sale = await Sale.findOne({ _id: id, organizationId });
     if (!sale) {
+      console.warn(tag, "sale not found", id);
       return res.status(404).json({ success: false, message: "Sale not found" });
     }
+    console.log(tag, "sale found", { saleId: String(sale._id), paymentStatus: sale.paymentStatus, salesChannel: sale.salesChannel, total: sale.totalAmount });
 
     const hasAccess = await userHasLocationAccess({
       organizationId,
@@ -3656,6 +3662,7 @@ const startMpesaStk = async (req, res) => {
       locationId: sale.locationId,
     });
     if (!hasAccess) {
+      console.warn(tag, "no location access", { userId, locationId: String(sale.locationId) });
       return res.status(403).json({
         success: false,
         message: "Access denied. You do not have access to this location.",
@@ -3664,6 +3671,7 @@ const startMpesaStk = async (req, res) => {
     }
 
     if (sale.paymentStatus !== "pending") {
+      console.warn(tag, "not pending", sale.paymentStatus);
       return res.status(400).json({
         success: false,
         message: `Sale is not pending payment (status: ${sale.paymentStatus})`,
@@ -3671,6 +3679,7 @@ const startMpesaStk = async (req, res) => {
     }
 
     if (sale.pendingMpesa?.checkoutRequestId) {
+      console.warn(tag, "already in flight", sale.pendingMpesa.checkoutRequestId);
       return res.status(409).json({
         success: false,
         message: "An STK push is already in flight for this sale",
@@ -3679,14 +3688,32 @@ const startMpesaStk = async (req, res) => {
     }
 
     const org = await Organization.findById(organizationId).lean();
+    if (!org) {
+      console.error(tag, "org not found", String(organizationId));
+      return res.status(404).json({ success: false, message: "Organization not found" });
+    }
     const orgLocation = await Location.findById(sale.locationId)
       .select("paymentMethods mpesaStkEnabled")
       .lean();
     if (!orgLocation) {
+      console.error(tag, "location not found", String(sale.locationId));
       return res.status(404).json({ success: false, message: "Location not found" });
     }
 
-    // Verify STK is actually enabled for this location
+    console.log(tag, "org + location loaded", {
+      darajaEnabled: org.daraja?.enabled,
+      mpesaStkEnabledOrg: org.daraja?.mpesaStkEnabled,
+      environment: org.daraja?.environment,
+      shortcode: org.daraja?.shortcode,
+      txType: org.daraja?.transactionType,
+      locationStkOverride: orgLocation.mpesaStkEnabled,
+      hasConsumerKey: Boolean(org.daraja?.consumerKey),
+      hasConsumerSecret: Boolean(org.daraja?.consumerSecret),
+      hasPasskey: Boolean(org.daraja?.passkey),
+      hasCallbackSecret: Boolean(org.daraja?.callbackSecret),
+      hasShortcode: Boolean(org.daraja?.shortcode),
+    });
+
     const orgEnabled =
       org?.daraja?.enabled === true && org?.daraja?.mpesaStkEnabled === true;
     const locOverride = orgLocation.mpesaStkEnabled;
@@ -3697,6 +3724,7 @@ const startMpesaStk = async (req, res) => {
           ? org?.daraja?.enabled === true && org?.daraja?.mpesaStkEnabled === true
           : orgEnabled;
 
+    console.log(tag, "stk available?", stkAvailable);
     if (!stkAvailable) {
       return res.status(400).json({
         success: false,
@@ -3705,47 +3733,68 @@ const startMpesaStk = async (req, res) => {
     }
 
     if (!org?.daraja?.consumerKey || !org?.daraja?.consumerSecret) {
+      console.error(tag, "missing consumer credentials");
       return res.status(400).json({
         success: false,
         message: "Daraja credentials are not configured for this organization",
       });
     }
     if (!org?.daraja?.shortcode || !org?.daraja?.passkey) {
+      console.error(tag, "missing shortcode or passkey");
       return res.status(400).json({
         success: false,
         message: "Daraja shortcode or passkey is missing",
       });
     }
     if (!org?.daraja?.callbackSecret) {
+      console.error(tag, "missing callback secret");
       return res.status(400).json({
         success: false,
         message: "Daraja callback secret is missing",
       });
     }
 
-    // Decrypt Daraja creds
     const secretBox = require("../services/secretBox");
     const daraja = require("../services/daraja");
-    const consumerKey = secretBox.decrypt(org.daraja.consumerKey);
-    const consumerSecret = secretBox.decrypt(org.daraja.consumerSecret);
-    const passkey = secretBox.decrypt(org.daraja.passkey);
-    const callbackSecret = secretBox.decrypt(org.daraja.callbackSecret);
+
+    let consumerKey, consumerSecret, passkey, callbackSecret;
+    try {
+      consumerKey = secretBox.decrypt(org.daraja.consumerKey);
+      consumerSecret = secretBox.decrypt(org.daraja.consumerSecret);
+      passkey = secretBox.decrypt(org.daraja.passkey);
+      callbackSecret = secretBox.decrypt(org.daraja.callbackSecret);
+      console.log(tag, "decrypted secrets", {
+        consumerKeyLen: consumerKey?.length,
+        consumerSecretLen: consumerSecret?.length,
+        passkeyLen: passkey?.length,
+        callbackSecretLen: callbackSecret?.length,
+      });
+    } catch (decErr) {
+      console.error(tag, "decrypt failed:", decErr.message, decErr.stack);
+      return res.status(500).json({
+        success: false,
+        message: "Failed to decrypt Daraja credentials: " + decErr.message,
+      });
+    }
 
     const apiUrl = process.env.PUBLIC_API_URL;
+    console.log(tag, "PUBLIC_API_URL =", apiUrl);
     if (!apiUrl || !apiUrl.startsWith("https://")) {
+      console.error(tag, "PUBLIC_API_URL invalid");
       return res.status(500).json({
         success: false,
         message: "PUBLIC_API_URL must be set and https for Daraja callbacks",
       });
     }
     const callbackUrl = `${apiUrl}/storefront/mpesa/callback?key=${encodeURIComponent(callbackSecret)}`;
+    console.log(tag, "callbackUrl =", callbackUrl);
 
-    // Amount: totalAmount minus already-paid portion (usually zero here)
     const completedTotal = getCompletedPaymentsTotal(sale.payments || []);
     const amountDue = Math.max(
       0,
       roundMoney((sale.totalAmount || 0) - completedTotal),
     );
+    console.log(tag, "amountDue =", amountDue);
     if (amountDue <= 0) {
       return res.status(400).json({
         success: false,
@@ -3755,6 +3804,13 @@ const startMpesaStk = async (req, res) => {
 
     let stkResult;
     try {
+      console.log(tag, "calling daraja.initiateStkPush", {
+        environment: org.daraja.environment,
+        shortcode: org.daraja.shortcode,
+        phone,
+        amount: amountDue,
+        accountReference: sale.receiptNumber,
+      });
       stkResult = await daraja.initiateStkPush({
         organizationId,
         environment: org.daraja.environment || "sandbox",
@@ -3768,11 +3824,19 @@ const startMpesaStk = async (req, res) => {
         transactionDesc: "Payment",
         callbackUrl,
       });
+      console.log(tag, "daraja returned", {
+        checkoutRequestId: stkResult.checkoutRequestId,
+        responseCode: stkResult.responseCode,
+        responseDescription: stkResult.responseDescription,
+      });
     } catch (err) {
-      console.error("[POS STK] daraja error:", err.message);
+      console.error(tag, "daraja threw:", err.message);
+      console.error(tag, "daraja err.raw:", JSON.stringify(err.raw || null));
+      console.error(tag, "daraja err.stack:", err.stack);
       return res.status(502).json({
         success: false,
         message: err.message || "Daraja STK push failed",
+        raw: err.raw || null,
       });
     }
 
@@ -3781,9 +3845,9 @@ const startMpesaStk = async (req, res) => {
       phone: daraja.normalizePhone(phone),
       startedAt: new Date(),
     };
-    // Also set the top-level field so existing callback resolution works.
     sale.checkoutRequestId = stkResult.checkoutRequestId;
     await sale.save();
+    console.log(tag, "sale saved with pendingMpesa", String(sale._id));
 
     return res.status(200).json({
       success: true,
@@ -3793,7 +3857,8 @@ const startMpesaStk = async (req, res) => {
       amountDue,
     });
   } catch (error) {
-    console.error("Start M-Pesa STK error:", error);
+    console.error(tag, "FATAL:", error.message);
+    console.error(tag, "FATAL stack:", error.stack);
     return res.status(500).json({
       success: false,
       message: "Failed to start M-Pesa STK",
