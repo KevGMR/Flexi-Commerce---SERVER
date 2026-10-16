@@ -13,6 +13,8 @@ const {
 
 const { processInventoryUpdates } = require("../services/inventoryUpdater");
 
+const secretBox = require("../services/secretBox");
+
 /**
  * POST /storefront/mpesa/callback
  *
@@ -60,13 +62,25 @@ async function handleMpesaCallback(req, res) {
       .lean();
 
     const providedKey = req.query.key;
-    const expectedKey = org?.daraja?.callbackSecret;
-    // Only enforce key match for storefront sales. For POS sales we still
-    // enforce it — same key, same org.
+        let expectedKey = org?.daraja?.callbackSecret;
+    if (expectedKey) {
+      // The secret is stored encrypted. Decrypt before comparing.
+      try {
+        expectedKey = secretBox.decrypt(expectedKey);
+      } catch {
+        // Legacy plaintext — compare as-is.
+      }
+    }
     if (expectedKey && providedKey !== expectedKey) {
       console.warn(
         "[MpesaCallback] callback secret mismatch for sale",
         sale._id,
+        {
+          providedLen: String(providedKey || "").length,
+          expectedLen: String(expectedKey || "").length,
+          providedPrefix: String(providedKey || "").slice(0, 6),
+          expectedPrefix: String(expectedKey || "").slice(0, 6),
+        },
       );
       return ack();
     }
@@ -180,6 +194,6 @@ async function handleMpesaCallback(req, res) {
 }
 
 
-router.post("/mpesa/callback", handleMpesaCallback);
+router.post("/callback", handleMpesaCallback);
 
 module.exports = router;

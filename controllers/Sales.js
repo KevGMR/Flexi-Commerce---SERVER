@@ -1211,6 +1211,19 @@ const getSaleReceivable = async (req, res) => {
 };
 
 /**
+ * Decrypt a value that may be either a secretBox-encrypted payload or a
+ * legacy plaintext string. Returns { value, wasPlaintext }. Never throws.
+ */
+function decryptOrPlaintext(stored) {
+  if (!stored) return { value: "", wasPlaintext: false };
+  try {
+    return { value: secretBox.decrypt(stored), wasPlaintext: false };
+  } catch {
+    return { value: String(stored), wasPlaintext: true };
+  }
+}
+
+/**
  * POST /sales/:id/payments
  * Add additional payment to settle outstanding receivable
  */
@@ -3762,19 +3775,26 @@ const startMpesaStk = async (req, res) => {
       consumerKey = secretBox.decrypt(org.daraja.consumerKey);
       consumerSecret = secretBox.decrypt(org.daraja.consumerSecret);
       passkey = secretBox.decrypt(org.daraja.passkey);
-      callbackSecret = secretBox.decrypt(org.daraja.callbackSecret);
-      console.log(tag, "decrypted secrets", {
-        consumerKeyLen: consumerKey?.length,
-        consumerSecretLen: consumerSecret?.length,
-        passkeyLen: passkey?.length,
-        callbackSecretLen: callbackSecret?.length,
-      });
     } catch (decErr) {
-      console.error(tag, "decrypt failed:", decErr.message, decErr.stack);
+      console.error(tag, "primary secret decrypt failed:", decErr.message);
       return res.status(500).json({
         success: false,
         message: "Failed to decrypt Daraja credentials: " + decErr.message,
       });
+    }
+
+    const cb = decryptOrPlaintext(org.daraja.callbackSecret);
+    callbackSecret = cb.value;
+    if (cb.wasPlaintext && callbackSecret) {
+      console.warn(tag, "legacy plaintext callbackSecret — re-encrypting");
+      try {
+        await Organization.updateOne(
+          { _id: organizationId },
+          { $set: { "daraja.callbackSecret": secretBox.encrypt(callbackSecret) } },
+        );
+      } catch (reencErr) {
+        console.error(tag, "re-encrypt failed:", reencErr.message);
+      }
     }
 
     const apiUrl = process.env.PUBLIC_API_URL;

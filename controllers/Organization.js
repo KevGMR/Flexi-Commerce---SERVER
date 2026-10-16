@@ -375,6 +375,23 @@ router.put("/:organizationId", verifyToken, async (req, res) => {
 
       const nextDaraja = { ...current };
 
+      // Hardening: if callbackSecret exists but isn't a valid encrypted
+      // payload, re-encrypt it. Catches orgs whose callbackSecret was
+      // written as plaintext by an earlier script.
+      if (nextDaraja.callbackSecret) {
+        let needsReencrypt = false;
+        try {
+          secretBox.decrypt(nextDaraja.callbackSecret);
+        } catch {
+          needsReencrypt = true;
+        }
+        if (needsReencrypt) {
+          nextDaraja.callbackSecret = secretBox.encrypt(
+            String(nextDaraja.callbackSecret),
+          );
+        }
+      }
+
       if (incoming.enabled !== undefined) {
         nextDaraja.enabled = incoming.enabled === true;
       }
