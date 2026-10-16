@@ -8,10 +8,60 @@ const Variant = require("../models/Variant");
 const Inventory = require("../models/Inventory");
 const Location = require("../models/Location");
 const Organization = require("../models/Organization");
+const { defaultOrgPaymentMethods } = require("../models/PaymentMethod");
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Resolve effective payment methods for a location.
+ *
+ * Rules:
+ *   - If location.paymentMethods is a non-empty array → use it (full override).
+ *   - Else → use org.paymentMethods (or the base four if the org has none).
+ *   - Filter to enabled only.
+ *   - Output shape is what the POS/Storefront consume: { key, label, icon,
+ *     isDefault }. `custom` and `enabled` are stripped because callers only
+ *     ever see enabled methods.
+ */
+function resolvePaymentMethods(org, location) {
+  const locPM = Array.isArray(location?.paymentMethods)
+    ? location.paymentMethods
+    : [];
+  const orgPM =
+    Array.isArray(org?.paymentMethods) && org.paymentMethods.length > 0
+      ? org.paymentMethods
+      : defaultOrgPaymentMethods();
+  const source = locPM.length > 0 ? locPM : orgPM;
+
+  return source
+    .filter((pm) => pm && pm.enabled !== false)
+    .map((pm) => ({
+      key: pm.key,
+      label: pm.label,
+      icon: pm.icon || "",
+      isDefault: pm.isDefault === true,
+    }));
+}
+
+/**
+ * Resolve whether the M-Pesa STK prompt is available for a location.
+ *   - Requires org.daraja.enabled === true AND daraja.mpesaStkEnabled === true
+ *   - Location override (mpesaStkEnabled) wins if it's a boolean.
+ *   - null / undefined → inherit org-level.
+ */
+function resolveMpesaStkAvailability(org, location) {
+  const orgEnabled =
+    org?.daraja?.enabled === true && org?.daraja?.mpesaStkEnabled === true;
+  const locOverride = location?.mpesaStkEnabled;
+  if (locOverride === true) {
+    // Location wants STK — still requires org-level Daraja to be on.
+    return org?.daraja?.enabled === true && org?.daraja?.mpesaStkEnabled === true;
+  }
+  if (locOverride === false) return false;
+  return orgEnabled;
+}
 
 /**
  * Resolve which location the storefront should price/stock against.
@@ -58,19 +108,21 @@ function publicProduct(p, variantAvailability) {
     image: v.images?.[0]?.url || null,
   }));
 
-  // First two images: primary + hover (if present)
   const images = (p.images || []).map((img) => ({
     url: img.url,
     alt: img.alt,
   }));
 
-  // Extract sizes from options — an option named "Size" or "Sizes"
-  // (case-insensitive). Falls back to first option with 3–10 values.
   let sizes = [];
   if (Array.isArray(p.options) && p.options.length > 0) {
     const sizeOption =
       p.options.find((o) => /^sizes?$/i.test((o.name || "").trim())) ||
-      p.options.find((o) => Array.isArray(o.values) && o.values.length >= 3 && o.values.length <= 10);
+      p.options.find(
+        (o) =>
+          Array.isArray(o.values) &&
+          o.values.length >= 3 &&
+          o.values.length <= 10,
+      );
     if (sizeOption) {
       sizes = (sizeOption.values || []).slice(0, 6);
     }
@@ -91,7 +143,6 @@ function publicProduct(p, variantAvailability) {
       (p.images || []).find((i) => i.isDefault)?.url ||
       (p.images || [])[0]?.url ||
       null,
-    // Second image used for hover state
     hoverImage: images[1]?.url || null,
     sizes,
     variants,
@@ -104,8 +155,6 @@ function publicProduct(p, variantAvailability) {
 
 /**
  * Load availability map for a set of products.
- * - Variants with trackInventory === false: available = null (unlimited)
- * - Variants with trackInventory !== false: available = Inventory.available ?? 0
  */
 async function loadAvailability(productIds, locationId, organizationId) {
   if (!locationId || productIds.length === 0) return {};
@@ -121,7 +170,6 @@ async function loadAvailability(productIds, locationId, organizationId) {
   if (variants.length === 0) return {};
 
   const map = {};
-
   const trackedVariantIds = [];
   for (const v of variants) {
     if (v.trackInventory === false) {
@@ -178,9 +226,6 @@ async function loadVariantsByProduct(productIds, organizationId) {
 
 // ---------------------------------------------------------------------------
 // GET /storefront/orgs/by-host?host=...
-// Used by the Next.js proxy to resolve a hostname to an org slug.
-// (No API key check on this one — it's called from Next.js middleware
-//  before we know which org, and it reveals only the slug mapping.)
 // ---------------------------------------------------------------------------
 
 router.get("/orgs/by-host", async (req, res) => {
@@ -192,7 +237,6 @@ router.get("/orgs/by-host", async (req, res) => {
 
     const cleanHost = String(host).toLowerCase().split(":")[0];
 
-    // 1. Exact match on custom domain
     let org = await Organization.findOne({
       "website.domain": cleanHost,
       "website.domainVerified": true,
@@ -201,7 +245,6 @@ router.get("/orgs/by-host", async (req, res) => {
       .select("slug")
       .lean();
 
-    // 2. Fall back to subdomain match
     if (!org) {
       const subdomain = cleanHost.split(".")[0];
       org = await Organization.findOne({
@@ -225,7 +268,6 @@ router.get("/orgs/by-host", async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // GET /storefront/products
-// Query: search, collectionId, limit, skip, locationId
 // ---------------------------------------------------------------------------
 
 router.get("/products", async (req, res) => {
@@ -380,7 +422,6 @@ router.get("/collections", async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // GET /storefront/collections/:slug
-// Returns collection metadata + paginated products.
 // ---------------------------------------------------------------------------
 
 router.get("/collections/:slug", async (req, res) => {
@@ -464,11 +505,10 @@ router.get("/collections/:slug", async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Organization lookup by slug
+// ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// Organization lookup by slug (used by storefront server components to
-// fetch org settings like name, currency, theme)
-// ---------------------------------------------------------------------------
 router.get("/org", async (req, res) => {
   try {
     const org = req.storefrontOrg;
@@ -477,6 +517,7 @@ router.get("/org", async (req, res) => {
 
     let deliveryCategories = [];
     let locationSummary = null;
+    let locationDoc = null;
 
     if (locationId) {
       const location = await Location.findOne({
@@ -484,10 +525,11 @@ router.get("/org", async (req, res) => {
         organizationId: org._id,
         status: "active",
       })
-        .select("_id name address deliveryCategories")
+        .select("_id name address deliveryCategories paymentMethods mpesaStkEnabled")
         .lean();
 
       if (location) {
+        locationDoc = location;
         locationSummary = {
           id: location._id,
           name: location.name,
@@ -517,6 +559,9 @@ router.get("/org", async (req, res) => {
     }
 
     const ann = org.website?.announcement || {};
+
+    const paymentMethods = resolvePaymentMethods(org, locationDoc);
+    const mpesaStkAvailable = resolveMpesaStkAvailability(org, locationDoc);
 
     return res.status(200).json({
       organization: {
@@ -549,6 +594,8 @@ router.get("/org", async (req, res) => {
         },
         location: locationSummary,
         deliveryCategories,
+        paymentMethods,
+        mpesaStkAvailable,
       },
     });
   } catch (error) {
@@ -558,3 +605,5 @@ router.get("/org", async (req, res) => {
 });
 
 module.exports = router;
+module.exports.resolvePaymentMethods = resolvePaymentMethods;
+module.exports.resolveMpesaStkAvailability = resolveMpesaStkAvailability;

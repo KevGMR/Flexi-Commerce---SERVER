@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 
 const Schema = mongoose.Schema;
+const { paymentMethodSchema } = require("./PaymentMethod");
 
 const locationSchema = new Schema(
   {
@@ -60,7 +61,26 @@ const locationSchema = new Schema(
       default: false,
     },
 
-        // Receipt customization (per location)
+    // Payment method override for this location.
+    // - Empty array []  → inherit org defaults (default behavior)
+    // - Non-empty array → use this list instead of org defaults
+    // The admin UI writes a full list when overriding; a location never
+    // merges entries with the org.
+    paymentMethods: {
+      type: [paymentMethodSchema],
+      default: [],
+    },
+
+    // M-Pesa STK prompt override for this location.
+    //   null  → inherit org-level daraja.mpesaStkEnabled
+    //   true  → force ON for this location (requires org daraja.enabled)
+    //   false → force OFF for this location
+    mpesaStkEnabled: {
+      type: Boolean,
+      default: null,
+    },
+
+    // Receipt customization (per location)
     receipt: {
       logoUrl: { type: String, default: "" },
       headerLines: {

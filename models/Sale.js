@@ -47,6 +47,13 @@ const saleSchema = new mongoose.Schema(
       sparse: true,
       index: true,
     },
+    // Pending M-Pesa STK state — only present while a POS sale waits for
+    // the customer to enter their PIN. Cleared on success/failure/cancel.
+    pendingMpesa: {
+      checkoutRequestId: { type: String, sparse: true, index: true },
+      phone: String,
+      startedAt: Date,
+    },
 
     // NEW: Sale-level default assigned user for commission
     assignedUser: {
@@ -234,6 +241,16 @@ const saleSchema = new mongoose.Schema(
           min: 0,
         },
         reference: String,
+        // How the payment was captured.
+        //   "stk"    = Daraja STK push (customer entered PIN)
+        //   "manual" = cashier marked it paid after an STK failure
+        //   undefined / null = traditional path (cashier picked the method
+        //                      and confirmed; no API involved)
+        source: {
+          type: String,
+          enum: ["stk", "manual", null],
+          default: null,
+        },
         status: {
           type: String,
           enum: ["completed", "pending", "failed"],

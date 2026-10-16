@@ -12,6 +12,8 @@ const ShopifyConnection = require("../models/ShopifyConnection");
 const UserOrganization = require("../models/UserOrganization");
 const Organization = require("../models/Organization");
 const Variant = require("../models/Variant")
+const crypto = require("crypto");
+
 const {
   updateShopifyInventory,
   queueInventoryUpdate,
@@ -20,6 +22,9 @@ const Inventory = require("../models/Inventory");
 const Expense = require("../models/Expense");
 const { requirePermission } = require("../middleware/permissionCheck");
 const { validateLocationAccess } = require("../middleware/locationAccess");
+
+const { processInventoryUpdates } = require("../services/inventoryUpdater");
+const { resolvePaymentMethods } = require("./Storefront");
 
 const VALID_TAX_MODES = ["inclusive", "exclusive"];
 const PAYMENT_METHODS = ["cash", "card", "mobile", "check", "credit", "mpesa"];
@@ -312,11 +317,12 @@ const createSale = async (req, res) => {
       }
     }
 
+    const useStk = req.body?.useStk === true;
     if (
       !locationId ||
       !items ||
       items.length === 0 ||
-      (!paymentMethod && (!payments || payments.length === 0))
+      (!paymentMethod && (!payments || payments.length === 0) && !useStk)
     ) {
       return res.status(400).json({
         success: false,
@@ -841,6 +847,11 @@ const createSale = async (req, res) => {
       ];
     }
 
+    // Override for STK-pending POS sales
+    if (useStk && normalizedPayments.length === 0) {
+      normalizedPayments = [];
+    }
+
     const completedPaymentsTotal = getCompletedPaymentsTotal(normalizedPayments);
     const initialBalanceDue = Math.max(0, roundMoney(totalAmount - completedPaymentsTotal));
     const overallPaymentStatus = deriveSalePaymentStatus(normalizedPayments, totalAmount);
@@ -986,8 +997,19 @@ const createSale = async (req, res) => {
         await sale.save({ session });
       }
 
-      // Process inventory updates
-      await processInventoryUpdates(sale, organizationId, session);
+      // Defer inventory for POS sales awaiting STK payment. The callback
+      // (or the mark-paid endpoint) will apply it once the customer pays.
+      // Everything else deducts immediately, as before.
+      const isPendingStk =
+        sale.salesChannel === "pos" &&
+        sale.paymentStatus === "pending" &&
+        Array.isArray(sale.payments) &&
+        sale.payments.length === 0 &&
+        req.body?.useStk === true;
+
+      if (!isPendingStk) {
+        await processInventoryUpdates(sale, organizationId, session);
+      }
 
       await session.commitTransaction();
 
@@ -1686,215 +1708,8 @@ const reallocateSalePayment = async (req, res) => {
  * Helper: Process inventory updates for FLEXI and Shopify items
  * Executes within a MongoDB transaction session
  */
-async function processInventoryUpdates(sale, organizationId, session) {
-  const connection = await ShopifyConnection.findOne({ organizationId })
-    .select("+clientId +clientSecret +accessToken +tokenExpiresAt")
-    .session(session);
 
-  const flexiLocation = await Location.findOne({
-    _id: sale.locationId,
-    organizationId,
-  }).session(session);
 
-  let totalShopifyItems = 0;
-  let syncedCount = 0;
-  let queuedCount = 0;
-  let failedCount = 0;
-
-  for (let i = 0; i < sale.items.length; i++) {
-    const item = sale.items[i];
-
-    // ---------- FLEXI (variant-level) ----------
-    if (item.type === "flexi") {
-      if (!item.variantId) {
-        throw new Error(
-          `Flexi item at index ${i} is missing variantId — cannot update inventory`,
-        );
-      }
-
-      const inventory = await Inventory.findOne({
-        organizationId,
-        variantId: item.variantId,
-        locationId: sale.locationId,
-      }).session(session);
-
-      if (!inventory) {
-        // No inventory row at this location. Record and move on — the
-        // variant is sellable but the till's location has no stock line.
-        sale.inventoryUpdates.push({
-          itemId: i.toString(),
-          type: "flexi",
-          variantId: item.variantId,
-          productId: item.productId,
-          quantityDeducted: item.quantity,
-          status: "failed",
-          error: `No inventory row for variant ${item.variantId} at location ${sale.locationId}`,
-        });
-        continue;
-      }
-
-      const variant = await Variant.findById(item.variantId)
-        .select("trackInventory continueSellingWhenOutOfStock")
-        .session(session)
-        .lean();
-
-      const isTracked = variant?.trackInventory !== false;
-      const canOversell = variant?.continueSellingWhenOutOfStock === true;
-
-      const previousOnHand = inventory.onHand || 0;
-      const previousAvailable =
-        inventory.available ?? inventory.onHand ?? 0;
-
-      // In-transaction stock gate. Authoritative — the pre-check in createSale
-      // is best-effort UX; this is what actually stops overselling.
-      if (isTracked && !canOversell && previousAvailable < item.quantity) {
-        throw new Error(
-          `Insufficient stock for variant ${item.variantId} at location ${sale.locationId}. Available: ${previousAvailable}, requested: ${item.quantity}`,
-        );
-      }
-
-      const newOnHand = previousOnHand - item.quantity;
-      const newAvailable = previousAvailable - item.quantity;
-
-      await Inventory.updateOne(
-        { _id: inventory._id },
-        {
-          $set: {
-            onHand: newOnHand,
-            available: newAvailable,
-            lastModified: new Date(),
-          },
-        },
-        { session },
-      );
-
-      sale.inventoryUpdates.push({
-        itemId: i.toString(),
-        type: "flexi",
-        variantId: item.variantId,
-        productId: item.productId,
-        quantityDeducted: item.quantity,
-        previousStock: previousOnHand,
-        newStock: newOnHand,
-        status: "success",
-      });
-    }
-
-    // ---------- SHOPIFY (unchanged) ----------
-    else if (item.type === "shopify" && connection) {
-      totalShopifyItems += 1;
-      try {
-        await updateShopifyInventory(
-          organizationId,
-          item.shopifyVariantId,
-          -item.quantity,
-          sale._id,
-          flexiLocation?.shopifyLocationId,
-        );
-
-        sale.inventoryUpdates.push({
-          itemId: i.toString(),
-          type: "shopify",
-          shopifyVariantId: item.shopifyVariantId,
-          quantityDeducted: item.quantity,
-          status: "success",
-        });
-        syncedCount += 1;
-      } catch (error) {
-        console.error(
-          `[Sales] Shopify inventory update failed for item ${i}:`,
-          error.message,
-        );
-
-        if (error.permanent === true) {
-          console.error(
-            `[Sales] Permanent Shopify sync failure for variant ${item.shopifyVariantId} — not queuing:`,
-            error.message,
-          );
-          sale.inventoryUpdates.push({
-            itemId: i.toString(),
-            type: "shopify",
-            shopifyVariantId: item.shopifyVariantId,
-            quantityDeducted: item.quantity,
-            status: "failed",
-            error: error.message,
-          });
-          failedCount += 1;
-          sale.shopifySyncLog.push({
-            shopifyVariantId: item.shopifyVariantId,
-            itemIndex: i,
-            status: "failed",
-            error: error.message,
-          });
-          continue;
-        }
-
-        try {
-          await queueInventoryUpdate(
-            organizationId,
-            null,
-            item.shopifyVariantId,
-            -item.quantity,
-            null,
-            sale._id,
-            flexiLocation?.shopifyLocationId,
-          );
-
-          sale.inventoryUpdates.push({
-            itemId: i.toString(),
-            type: "shopify",
-            shopifyVariantId: item.shopifyVariantId,
-            quantityDeducted: item.quantity,
-            status: "pending",
-            error: error.message,
-          });
-          queuedCount += 1;
-          sale.shopifySyncLog.push({
-            shopifyVariantId: item.shopifyVariantId,
-            itemIndex: i,
-            status: "retrying",
-            error: error.message,
-          });
-        } catch (queueError) {
-          console.error(
-            `[Sales] Queueing Shopify inventory update failed for item ${i}:`,
-            queueError.message,
-          );
-          sale.inventoryUpdates.push({
-            itemId: i.toString(),
-            type: "shopify",
-            shopifyVariantId: item.shopifyVariantId,
-            quantityDeducted: item.quantity,
-            status: "failed",
-            error: queueError.message,
-          });
-          failedCount += 1;
-          sale.shopifySyncLog.push({
-            shopifyVariantId: item.shopifyVariantId,
-            itemIndex: i,
-            status: "failed",
-            error: queueError.message,
-          });
-        }
-      }
-    }
-  }
-
-  // Shopify sync status rollup (unchanged)
-  if (totalShopifyItems > 0) {
-    if (syncedCount === totalShopifyItems) {
-      sale.shopifySyncStatus = "synced";
-    } else if (syncedCount > 0 || (queuedCount > 0 && failedCount > 0)) {
-      sale.shopifySyncStatus = "partial";
-    } else if (queuedCount > 0) {
-      sale.shopifySyncStatus = "pending";
-    } else if (failedCount > 0) {
-      sale.shopifySyncStatus = "failed";
-    }
-  }
-
-  await sale.save({ session });
-}
 
 /**
  * GET /sales/:id
@@ -3813,5 +3628,424 @@ router.get("/:id", requirePermission("view_sale_history"), getSale);
 router.get("/", requirePermission("view_sale_history"), listSales);
 router.post("/:id/void", requirePermission("refund_sale"), voidSale);
 router.post("/:id/refund", requirePermission("refund_sale"), refundSale);
+
+/**
+ * POST /sales/:id/mpesa-stk
+ * Fire a Daraja STK push for an existing pending POS sale.
+ * Body: { phone: string }
+ */
+const startMpesaStk = async (req, res) => {
+  try {
+    const { organizationId, userId, role } = req.user;
+    const { id } = req.params;
+    const { phone } = req.body || {};
+
+    if (!phone) {
+      return res.status(400).json({ success: false, message: "phone is required" });
+    }
+
+    const sale = await Sale.findOne({ _id: id, organizationId });
+    if (!sale) {
+      return res.status(404).json({ success: false, message: "Sale not found" });
+    }
+
+    const hasAccess = await userHasLocationAccess({
+      organizationId,
+      userId,
+      role,
+      locationId: sale.locationId,
+    });
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied. You do not have access to this location.",
+        code: "LOCATION_ACCESS_DENIED",
+      });
+    }
+
+    if (sale.paymentStatus !== "pending") {
+      return res.status(400).json({
+        success: false,
+        message: `Sale is not pending payment (status: ${sale.paymentStatus})`,
+      });
+    }
+
+    if (sale.pendingMpesa?.checkoutRequestId) {
+      return res.status(409).json({
+        success: false,
+        message: "An STK push is already in flight for this sale",
+        checkoutRequestId: sale.pendingMpesa.checkoutRequestId,
+      });
+    }
+
+    const org = await Organization.findById(organizationId).lean();
+    const orgLocation = await Location.findById(sale.locationId)
+      .select("paymentMethods mpesaStkEnabled")
+      .lean();
+    if (!orgLocation) {
+      return res.status(404).json({ success: false, message: "Location not found" });
+    }
+
+    // Verify STK is actually enabled for this location
+    const orgEnabled =
+      org?.daraja?.enabled === true && org?.daraja?.mpesaStkEnabled === true;
+    const locOverride = orgLocation.mpesaStkEnabled;
+    const stkAvailable =
+      locOverride === false
+        ? false
+        : locOverride === true
+          ? org?.daraja?.enabled === true && org?.daraja?.mpesaStkEnabled === true
+          : orgEnabled;
+
+    if (!stkAvailable) {
+      return res.status(400).json({
+        success: false,
+        message: "M-Pesa STK is not enabled for this location",
+      });
+    }
+
+    if (!org?.daraja?.consumerKey || !org?.daraja?.consumerSecret) {
+      return res.status(400).json({
+        success: false,
+        message: "Daraja credentials are not configured for this organization",
+      });
+    }
+    if (!org?.daraja?.shortcode || !org?.daraja?.passkey) {
+      return res.status(400).json({
+        success: false,
+        message: "Daraja shortcode or passkey is missing",
+      });
+    }
+    if (!org?.daraja?.callbackSecret) {
+      return res.status(400).json({
+        success: false,
+        message: "Daraja callback secret is missing",
+      });
+    }
+
+    // Decrypt Daraja creds
+    const secretBox = require("../services/secretBox");
+    const daraja = require("../services/daraja");
+    const consumerKey = secretBox.decrypt(org.daraja.consumerKey);
+    const consumerSecret = secretBox.decrypt(org.daraja.consumerSecret);
+    const passkey = secretBox.decrypt(org.daraja.passkey);
+    const callbackSecret = secretBox.decrypt(org.daraja.callbackSecret);
+
+    const apiUrl = process.env.PUBLIC_API_URL;
+    if (!apiUrl || !apiUrl.startsWith("https://")) {
+      return res.status(500).json({
+        success: false,
+        message: "PUBLIC_API_URL must be set and https for Daraja callbacks",
+      });
+    }
+    const callbackUrl = `${apiUrl}/storefront/mpesa/callback?key=${encodeURIComponent(callbackSecret)}`;
+
+    // Amount: totalAmount minus already-paid portion (usually zero here)
+    const completedTotal = getCompletedPaymentsTotal(sale.payments || []);
+    const amountDue = Math.max(
+      0,
+      roundMoney((sale.totalAmount || 0) - completedTotal),
+    );
+    if (amountDue <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Sale is already fully paid",
+      });
+    }
+
+    let stkResult;
+    try {
+      stkResult = await daraja.initiateStkPush({
+        organizationId,
+        environment: org.daraja.environment || "sandbox",
+        consumerKey,
+        consumerSecret,
+        shortcode: org.daraja.shortcode,
+        passkey,
+        phone,
+        amount: amountDue,
+        accountReference: sale.receiptNumber,
+        transactionDesc: "Payment",
+        callbackUrl,
+      });
+    } catch (err) {
+      console.error("[POS STK] daraja error:", err.message);
+      return res.status(502).json({
+        success: false,
+        message: err.message || "Daraja STK push failed",
+      });
+    }
+
+    sale.pendingMpesa = {
+      checkoutRequestId: stkResult.checkoutRequestId,
+      phone: daraja.normalizePhone(phone),
+      startedAt: new Date(),
+    };
+    // Also set the top-level field so existing callback resolution works.
+    sale.checkoutRequestId = stkResult.checkoutRequestId;
+    await sale.save();
+
+    return res.status(200).json({
+      success: true,
+      saleId: sale._id,
+      checkoutRequestId: stkResult.checkoutRequestId,
+      customerMessage: stkResult.customerMessage,
+      amountDue,
+    });
+  } catch (error) {
+    console.error("Start M-Pesa STK error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to start M-Pesa STK",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * GET /sales/:id/payment-status
+ * Polling endpoint for the POS waiting modal.
+ */
+const getSalePaymentStatus = async (req, res) => {
+  try {
+    const { organizationId, userId, role } = req.user;
+    const { id } = req.params;
+
+    const sale = await Sale.findOne({ _id: id, organizationId })
+      .select("_id paymentStatus payments pendingMpesa checkoutRequestId totalAmount locationId")
+      .lean();
+
+    if (!sale) {
+      return res.status(404).json({ success: false, message: "Sale not found" });
+    }
+
+    const hasAccess = await userHasLocationAccess({
+      organizationId,
+      userId,
+      role,
+      locationId: sale.locationId,
+    });
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied.",
+        code: "LOCATION_ACCESS_DENIED",
+      });
+    }
+
+    const mpesaReceipt = (sale.payments || []).find(
+      (p) => p.method === "mpesa" && p.status === "completed",
+    );
+
+    return res.status(200).json({
+      success: true,
+      saleId: sale._id,
+      paymentStatus: sale.paymentStatus,
+      mpesaReceiptNumber: mpesaReceipt?.reference || null,
+      checkoutRequestId:
+        sale.pendingMpesa?.checkoutRequestId || sale.checkoutRequestId || null,
+      amountDue: roundMoney(
+        Math.max(
+          0,
+          (sale.totalAmount || 0) - getCompletedPaymentsTotal(sale.payments || []),
+        ),
+      ),
+    });
+  } catch (error) {
+    console.error("Get payment status error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to get payment status",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * POST /sales/:id/mpesa-stk/mark-paid
+ * Manual fallback: cashier confirms M-Pesa payment outside the API.
+ * Body: { reference?: string }
+ */
+const markMpesaStkPaidManually = async (req, res) => {
+  const session = await Sale.startSession();
+  try {
+    const { organizationId, userId, role } = req.user;
+    const { id } = req.params;
+    const { reference } = req.body || {};
+
+    session.startTransaction();
+
+    const sale = await Sale.findOne({ _id: id, organizationId }).session(session);
+    if (!sale) {
+      await session.abortTransaction();
+      return res.status(404).json({ success: false, message: "Sale not found" });
+    }
+
+    const hasAccess = await userHasLocationAccess({
+      organizationId,
+      userId,
+      role,
+      locationId: sale.locationId,
+    });
+    if (!hasAccess) {
+      await session.abortTransaction();
+      return res.status(403).json({
+        success: false,
+        message: "Access denied.",
+        code: "LOCATION_ACCESS_DENIED",
+      });
+    }
+
+    if (sale.paymentStatus !== "pending") {
+      await session.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message: `Sale is not pending (status: ${sale.paymentStatus})`,
+      });
+    }
+
+    const completedTotal = getCompletedPaymentsTotal(sale.payments || []);
+    const amountDue = roundMoney((sale.totalAmount || 0) - completedTotal);
+    if (amountDue <= 0) {
+      await session.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message: "Sale is already fully paid",
+      });
+    }
+
+    sale.payments.push({
+      method: "mpesa",
+      amount: amountDue,
+      reference: reference ? String(reference).trim() : null,
+      status: "completed",
+      source: "manual",
+      paidAt: new Date(),
+    });
+
+    sale.paymentStatus = deriveSalePaymentStatus(sale.payments, sale.totalAmount);
+    sale.status = "completed";
+    sale.completedAt = new Date();
+    sale.pendingMpesa = undefined;
+
+    // Apply deferred inventory
+    try {
+      await processInventoryUpdates(sale, organizationId, session);
+    } catch (invErr) {
+      console.error("[POS STK mark-paid] inventory update failed:", invErr.message);
+      sale.inventoryStatus = "failed";
+    }
+
+    await sale.save({ session });
+    await session.commitTransaction();
+
+    return res.status(200).json({
+      success: true,
+      saleId: sale._id,
+      paymentStatus: sale.paymentStatus,
+      amountPaid: amountDue,
+    });
+  } catch (error) {
+    await session.abortTransaction();
+    console.error("Mark M-Pesa STK paid manually error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to mark as paid",
+      error: error.message,
+    });
+  } finally {
+    await session.endSession();
+  }
+};
+
+/**
+ * DELETE /sales/:id/pending
+ * Cancel a pending POS sale (cart stays in the client, sale is deleted).
+ * Only valid when paymentStatus === "pending" and salesChannel === "pos".
+ * No inventory reversal — nothing was deducted.
+ */
+const deletePendingSale = async (req, res) => {
+  try {
+    const { organizationId, userId, role } = req.user;
+    const { id } = req.params;
+
+    const sale = await Sale.findOne({ _id: id, organizationId }).lean();
+    if (!sale) {
+      return res.status(404).json({ success: false, message: "Sale not found" });
+    }
+
+    const hasAccess = await userHasLocationAccess({
+      organizationId,
+      userId,
+      role,
+      locationId: sale.locationId,
+    });
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied.",
+        code: "LOCATION_ACCESS_DENIED",
+      });
+    }
+
+    if (sale.salesChannel !== "pos") {
+      return res.status(400).json({
+        success: false,
+        message: "Only POS pending sales can be deleted via this endpoint",
+      });
+    }
+
+    if (sale.paymentStatus !== "pending") {
+      return res.status(400).json({
+        success: false,
+        message: `Sale is not pending (status: ${sale.paymentStatus})`,
+      });
+    }
+
+    // Delete the pending sale. If a delivery fee was created for it, remove
+    // that too — but for STK sales we don't create delivery fees until after
+    // payment, so this is typically a no-op.
+    await Sale.deleteOne({ _id: sale._id });
+
+    if (sale.deliveryFeeId) {
+      await DeliveryFee.deleteOne({
+        _id: sale.deliveryFeeId,
+        organizationId,
+      }).catch((e) =>
+        console.warn("[deletePendingSale] delivery cleanup failed:", e.message),
+      );
+    }
+
+    return res.status(200).json({ success: true, saleId: sale._id });
+  } catch (error) {
+    console.error("Delete pending sale error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to delete pending sale",
+      error: error.message,
+    });
+  }
+};
+
+router.post(
+  "/:id/mpesa-stk",
+  requirePermission("create_sale"),
+  startMpesaStk,
+);
+router.get(
+  "/:id/payment-status",
+  requirePermission("create_sale"),
+  getSalePaymentStatus,
+);
+router.post(
+  "/:id/mpesa-stk/mark-paid",
+  requirePermission("create_sale"),
+  markMpesaStkPaidManually,
+);
+router.delete(
+  "/:id/pending",
+  requirePermission("create_sale"),
+  deletePendingSale,
+);
 
 module.exports = router;

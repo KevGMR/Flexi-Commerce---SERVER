@@ -13,6 +13,99 @@ const { getAccessToken } = require("../data/shopifyAuth");
 const VALID_TAX_MODES = ["inclusive", "exclusive"];
 
 /**
+ * Validate an array of payment-method payloads.
+ * Returns { ok: true, value: [...] } or { ok: false, error }.
+ * Never trusts client input. Enforces:
+ *   - array
+ *   - max 20 entries
+ *   - key: /^[a-z][a-z0-9_]{0,39}$/, unique per array
+ *   - label: required, max 40 chars after trim
+ *   - icon: string, max 300 chars after trim (may be empty)
+ *   - enabled: boolean, default true
+ *   - isDefault: boolean, at most one true in the array
+ *   - custom: boolean, default false
+ */
+function validatePaymentMethods(input) {
+  if (input === undefined) return { ok: true, value: undefined };
+  if (!Array.isArray(input)) {
+    return { ok: false, error: "paymentMethods must be an array" };
+  }
+  if (input.length > 20) {
+    return { ok: false, error: "Maximum 20 payment methods" };
+  }
+
+  const seen = new Set();
+  const cleaned = [];
+  let defaultCount = 0;
+
+  for (let i = 0; i < input.length; i++) {
+    const pm = input[i];
+    if (!pm || typeof pm !== "object") {
+      return { ok: false, error: `paymentMethods[${i}] is not an object` };
+    }
+    const key =
+      typeof pm.key === "string" ? pm.key.toLowerCase().trim() : "";
+    if (!/^[a-z][a-z0-9_]{0,39}$/.test(key)) {
+      return {
+        ok: false,
+        error: `paymentMethods[${i}].key must be lowercase alphanumeric with underscores, starting with a letter`,
+      };
+    }
+    if (seen.has(key)) {
+      return {
+        ok: false,
+        error: `paymentMethods key "${key}" is duplicated`,
+      };
+    }
+    seen.add(key);
+
+    const label =
+      typeof pm.label === "string" ? pm.label.trim().slice(0, 40) : "";
+    if (!label) {
+      return { ok: false, error: `paymentMethods[${i}].label is required` };
+    }
+
+    const icon =
+      typeof pm.icon === "string" ? pm.icon.trim().slice(0, 300) : "";
+
+    const isDefault = pm.isDefault === true;
+    if (isDefault) defaultCount += 1;
+
+    cleaned.push({
+      key,
+      label,
+      icon,
+      enabled: pm.enabled !== false,
+      isDefault,
+      custom: pm.custom === true,
+    });
+  }
+
+  if (defaultCount > 1) {
+    return {
+      ok: false,
+      error: "Only one payment method can be marked as default",
+    };
+  }
+
+  return { ok: true, value: cleaned };
+}
+
+/**
+ * Validate the mpesaStkEnabled payload.
+ * Accepts true, false, or null (inherit).
+ */
+function validateMpesaStkEnabled(input) {
+  if (input === undefined) return { ok: true, value: undefined };
+  if (input === null) return { ok: true, value: null };
+  if (typeof input === "boolean") return { ok: true, value: input };
+  return {
+    ok: false,
+    error: "mpesaStkEnabled must be true, false, or null",
+  };
+}
+
+/**
  * Create location
  * POST /locations
  */
@@ -31,10 +124,22 @@ router.post("/", verifyToken, async (req, res) => {
       currency,
       isDefault,
       metafieldDefinitions,
+      paymentMethods,
+      mpesaStkEnabled,
     } = req.body;
 
     if (!name || !locationType) {
       return res.status(400).json({ error: "name and locationType are required" });
+    }
+
+    // Validate payment methods + STK override before doing anything
+    const pmCheck = validatePaymentMethods(paymentMethods);
+    if (!pmCheck.ok) {
+      return res.status(400).json({ error: pmCheck.error });
+    }
+    const stkCheck = validateMpesaStkEnabled(mpesaStkEnabled);
+    if (!stkCheck.ok) {
+      return res.status(400).json({ error: stkCheck.error });
     }
 
     // If isDefault, unset other defaults
@@ -66,13 +171,20 @@ router.post("/", verifyToken, async (req, res) => {
       currency,
       isDefault: isDefault || false,
       metafieldDefinitions,
+      ...(pmCheck.value !== undefined ? { paymentMethods: pmCheck.value } : {}),
+      ...(stkCheck.value !== undefined ? { mpesaStkEnabled: stkCheck.value } : {}),
     });
 
     await location.save();
 
-    await logTokenEvent(req.user.userId, organizationId, "location_created", req.ip, req.get("user-agent"), {
-      details: `Location created: ${name}`,
-    });
+    await logTokenEvent(
+      req.user.userId,
+      organizationId,
+      "location_created",
+      req.ip,
+      req.get("user-agent"),
+      { details: `Location created: ${name}` },
+    );
 
     return res.status(201).json({ message: "Location created", location });
   } catch (error) {
@@ -148,7 +260,19 @@ router.put("/:id", verifyToken, async (req, res) => {
       isDefault,
       status,
       metafieldDefinitions,
+      paymentMethods,
+      mpesaStkEnabled,
     } = req.body;
+
+    // Validate payment methods + STK override up front
+    const pmCheck = validatePaymentMethods(paymentMethods);
+    if (!pmCheck.ok) {
+      return res.status(400).json({ error: pmCheck.error });
+    }
+    const stkCheck = validateMpesaStkEnabled(mpesaStkEnabled);
+    if (!stkCheck.ok) {
+      return res.status(400).json({ error: stkCheck.error });
+    }
 
     const location = await Location.findOne({ _id: req.params.id, organizationId });
     if (!location) {
@@ -184,11 +308,24 @@ router.put("/:id", verifyToken, async (req, res) => {
     if (status) location.status = status;
     if (metafieldDefinitions) location.metafieldDefinitions = metafieldDefinitions;
 
+    if (pmCheck.value !== undefined) {
+      location.paymentMethods = pmCheck.value;
+    }
+
+    if (stkCheck.value !== undefined) {
+      location.mpesaStkEnabled = stkCheck.value;
+    }
+
     await location.save();
 
-    await logTokenEvent(req.user.userId, organizationId, "location_updated", req.ip, req.get("user-agent"), {
-      details: `Location updated: ${location.name}`,
-    });
+    await logTokenEvent(
+      req.user.userId,
+      organizationId,
+      "location_updated",
+      req.ip,
+      req.get("user-agent"),
+      { details: `Location updated: ${location.name}` },
+    );
 
     return res.status(200).json({ message: "Location updated", location });
   } catch (error) {
@@ -353,7 +490,6 @@ router.post("/:id/set-shopify-location", verifyToken, async (req, res) => {
     return res.status(500).json({ error: "Failed to set Shopify location" });
   }
 });
-
 
 /**
  * Update receipt customization for a location

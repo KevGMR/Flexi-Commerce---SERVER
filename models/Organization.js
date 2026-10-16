@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const { Schema } = mongoose;
+const { paymentMethodSchema, defaultOrgPaymentMethods } = require("./PaymentMethod");
 
 const organizationSchema = new Schema(
   {
@@ -36,6 +37,13 @@ const organizationSchema = new Schema(
         default: "inclusive",
       },
     },
+
+    // Org-level default payment methods. Locations may override.
+    paymentMethods: {
+      type: [paymentMethodSchema],
+      default: defaultOrgPaymentMethods,
+    },
+
     // Website builder placeholder
 
     // Website / storefront
@@ -121,6 +129,10 @@ const organizationSchema = new Schema(
       // Random per-org secret appended to the callback URL as ?key=
       // Used to verify that callbacks actually came from Safaricom.
       callbackSecret: String,
+      // Whether the POS should offer the M-Pesa STK prompt at all.
+      // This is the org-level default; locations can override per-till.
+      // Requires daraja.enabled to be true for the tile to actually appear.
+      mpesaStkEnabled: { type: Boolean, default: false },
     },
 
     // Billing/plan

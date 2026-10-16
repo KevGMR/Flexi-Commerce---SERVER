@@ -14,6 +14,7 @@ const { logTokenEvent } = require("../services/auditLogger");
 const { sendOrganizationInvitation } = require("../services/emailNotifier");
 const { loginLimiter } = require("../middleware/rateLimiter");
 const vercel = require("../services/vercel");
+const secretBox = require("../services/secretBox");
 
 
 const VALID_TAX_MODES = ["inclusive", "exclusive"];
@@ -254,9 +255,34 @@ router.get("/:organizationId", verifyToken, async (req, res) => {
       organizationId: req.params.organizationId,
     });
 
+    // Mask Daraja secret fields before returning.
+    // Secret fields are: consumerKey, consumerSecret, passkey.
+    // We never expose them, only whether they're set + a short preview.
+    const orgForClient = { ...org };
+    if (orgForClient.daraja) {
+      const d = orgForClient.daraja;
+      const preview = (val) => {
+        if (!val || typeof val !== "string") return { set: false, preview: "" };
+        // Show last 4 of the ciphertext — it's an opaque blob to the client
+        // but gives the admin a visual "yes something is stored" cue.
+        return { set: true, preview: `…${val.slice(-4)}` };
+      };
+      orgForClient.daraja = {
+        enabled: d.enabled === true,
+        environment: d.environment || "sandbox",
+        shortcode: d.shortcode || "",
+        transactionType: d.transactionType || "CustomerPayBillOnline",
+        mpesaStkEnabled: d.mpesaStkEnabled === true,
+        consumerKey: preview(d.consumerKey),
+        consumerSecret: preview(d.consumerSecret),
+        passkey: preview(d.passkey),
+        callbackSecret: preview(d.callbackSecret),
+      };
+    }
+
     return res.status(200).json({
       organization: {
-        ...org,
+        ...orgForClient,
         role: effectiveMembership?.membership?.role || membership.role,
         permissions: effectiveMembership?.permissions || membership.permissions || [],
         locations: effectiveMembership?.membership?.locations || membership.locations || [],
@@ -341,6 +367,73 @@ router.put("/:organizationId", verifyToken, async (req, res) => {
       };
     }
 
+    // Daraja credentials — top-level field, not under website.
+    // Secrets are encrypted at rest. Reads are masked in GET handler.
+    if (req.body.daraja !== undefined) {
+      const incoming = req.body.daraja || {};
+      const current = org.daraja || {};
+
+      const nextDaraja = { ...current };
+
+      if (incoming.enabled !== undefined) {
+        nextDaraja.enabled = incoming.enabled === true;
+      }
+      if (incoming.environment !== undefined) {
+        if (!["sandbox", "production"].includes(incoming.environment)) {
+          return res
+            .status(400)
+            .json({ error: "daraja.environment must be sandbox or production" });
+        }
+        nextDaraja.environment = incoming.environment;
+      }
+      if (incoming.shortcode !== undefined) {
+        nextDaraja.shortcode = String(incoming.shortcode).trim().slice(0, 20);
+      }
+      if (incoming.transactionType !== undefined) {
+        if (
+          !["CustomerPayBillOnline", "CustomerBuyGoodsOnline"].includes(
+            incoming.transactionType,
+          )
+        ) {
+          return res.status(400).json({
+            error:
+              "daraja.transactionType must be CustomerPayBillOnline or CustomerBuyGoodsOnline",
+          });
+        }
+        nextDaraja.transactionType = incoming.transactionType;
+      }
+      if (incoming.mpesaStkEnabled !== undefined) {
+        nextDaraja.mpesaStkEnabled = incoming.mpesaStkEnabled === true;
+      }
+
+      // Secret fields: only re-encrypt if a non-empty string is provided.
+      // Sending "" or null clears the field. Omitting the field keeps it.
+      const secretFields = ["consumerKey", "consumerSecret", "passkey"];
+      for (const field of secretFields) {
+        if (incoming[field] === undefined) continue;
+        if (incoming[field] === null || incoming[field] === "") {
+          nextDaraja[field] = "";
+          continue;
+        }
+        if (typeof incoming[field] !== "string") {
+          return res
+            .status(400)
+            .json({ error: `daraja.${field} must be a string` });
+        }
+        nextDaraja[field] = secretBox.encrypt(incoming[field]);
+      }
+
+      // Generate a callback secret if enabling Daraja and none exists.
+      const willBeEnabled = nextDaraja.enabled === true;
+      if (willBeEnabled && !nextDaraja.callbackSecret) {
+        nextDaraja.callbackSecret = secretBox.encrypt(
+          require("crypto").randomBytes(32).toString("hex"),
+        );
+      }
+
+      updateDoc.daraja = nextDaraja;
+    }
+
     if (website !== undefined) {
       const current = org.website || {};
 
@@ -359,6 +452,7 @@ router.put("/:organizationId", verifyToken, async (req, res) => {
         "headerLayout",
         "homepage",
         "announcement",
+        "paymentMethods",
       ];
 
       const nextWebsite = { ...current };
@@ -396,6 +490,69 @@ router.put("/:organizationId", verifyToken, async (req, res) => {
           href,
           isActive: raw.isActive !== false,
         };
+      }
+
+      // Payment methods — array of { key, label, icon, enabled, isDefault, custom }
+      if (website.paymentMethods !== undefined) {
+        if (!Array.isArray(website.paymentMethods)) {
+          return res
+            .status(400)
+            .json({ error: "website.paymentMethods must be an array" });
+        }
+        if (website.paymentMethods.length > 20) {
+          return res
+            .status(400)
+            .json({ error: "Maximum 20 payment methods" });
+        }
+        const seen = new Set();
+        const cleaned = [];
+        let defaultCount = 0;
+        for (let i = 0; i < website.paymentMethods.length; i++) {
+          const pm = website.paymentMethods[i];
+          if (!pm || typeof pm !== "object") {
+            return res
+              .status(400)
+              .json({ error: `paymentMethods[${i}] is not an object` });
+          }
+          const key =
+            typeof pm.key === "string" ? pm.key.toLowerCase().trim() : "";
+          if (!/^[a-z][a-z0-9_]{0,39}$/.test(key)) {
+            return res.status(400).json({
+              error: `paymentMethods[${i}].key must be lowercase alphanumeric with underscores, starting with a letter`,
+            });
+          }
+          if (seen.has(key)) {
+            return res
+              .status(400)
+              .json({ error: `paymentMethods key "${key}" is duplicated` });
+          }
+          seen.add(key);
+          const label =
+            typeof pm.label === "string" ? pm.label.trim().slice(0, 40) : "";
+          if (!label) {
+            return res
+              .status(400)
+              .json({ error: `paymentMethods[${i}].label is required` });
+          }
+          const icon =
+            typeof pm.icon === "string" ? pm.icon.trim().slice(0, 300) : "";
+          const isDefault = pm.isDefault === true;
+          if (isDefault) defaultCount += 1;
+          cleaned.push({
+            key,
+            label,
+            icon,
+            enabled: pm.enabled !== false,
+            isDefault,
+            custom: pm.custom === true,
+          });
+        }
+        if (defaultCount > 1) {
+          return res
+            .status(400)
+            .json({ error: "Only one payment method can be marked as default" });
+        }
+        nextWebsite.paymentMethods = cleaned;
       }
 
       // Validate color hex if provided
@@ -1305,6 +1462,59 @@ router.put(
     } catch (error) {
       console.error("Error updating locations:", error);
       return res.status(500).json({ error: "Failed to update locations" });
+    }
+  },
+);
+
+/**
+ * GET /organizations/:organizationId/daraja/callback-url
+ * Return the full callback URL (with decrypted secret) for the admin to
+ * paste into Safaricom's Daraja portal. This is the only endpoint that
+ * decrypts the callback secret; all other reads are masked.
+ */
+router.get(
+  "/:organizationId/daraja/callback-url",
+  verifyToken,
+  async (req, res) => {
+    try {
+      const membership = await UserOrganization.findOne({
+        userId: req.user.userId,
+        organizationId: req.params.organizationId,
+      }).lean();
+      if (!membership || !["Owner", "Manager"].includes(membership.role)) {
+        return res.status(403).json({
+          error: "Only Owner or Manager can view Daraja callback URL",
+        });
+      }
+
+      const org = await Organization.findById(req.params.organizationId)
+        .select("daraja.callbackSecret")
+        .lean();
+
+      if (!org?.daraja?.callbackSecret) {
+        return res.status(404).json({
+          error: "No callback secret set. Enable Daraja first.",
+        });
+      }
+
+      let secret;
+      try {
+        secret = secretBox.decrypt(org.daraja.callbackSecret);
+      } catch (e) {
+        return res.status(500).json({
+          error: "Failed to decrypt callback secret. Re-enable Daraja.",
+        });
+      }
+
+      const apiUrl = process.env.PUBLIC_API_URL || "";
+      const url = apiUrl
+        ? `${apiUrl}/storefront/mpesa/callback?key=${encodeURIComponent(secret)}`
+        : "";
+
+      return res.status(200).json({ url, hasApiUrl: Boolean(apiUrl) });
+    } catch (error) {
+      console.error("Get Daraja callback URL error:", error);
+      return res.status(500).json({ error: "Failed to generate callback URL" });
     }
   },
 );

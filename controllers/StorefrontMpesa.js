@@ -11,6 +11,8 @@ const {
   sendStorefrontPaymentFailed,
 } = require("../services/emailNotifier");
 
+const { processInventoryUpdates } = require("../services/inventoryUpdater");
+
 /**
  * POST /storefront/mpesa/callback
  *
@@ -46,18 +48,21 @@ async function handleMpesaCallback(req, res) {
       return ack();
     }
 
+    const isPos = sale.salesChannel === "pos";
+
     // Idempotency: if we've already processed this callback, ack and exit.
     if (sale.paymentStatus === "completed" || sale.paymentStatus === "failed") {
       return ack();
     }
 
-    // Verify callback secret (Safaricom echoes it back via ?key=)
-    const providedKey = req.query.key;
     const org = await Organization.findById(sale.organizationId)
       .select("name settings.currency daraja.callbackSecret")
       .lean();
 
+    const providedKey = req.query.key;
     const expectedKey = org?.daraja?.callbackSecret;
+    // Only enforce key match for storefront sales. For POS sales we still
+    // enforce it — same key, same org.
     if (expectedKey && providedKey !== expectedKey) {
       console.warn(
         "[MpesaCallback] callback secret mismatch for sale",
@@ -66,8 +71,21 @@ async function handleMpesaCallback(req, res) {
       return ack();
     }
 
+    // ---------- Payment failed ----------
     if (!parsed.ok) {
-      // ---------- Payment failed ----------
+      if (isPos) {
+        // POS: leave the sale pending. The cashier can retry, switch to
+        // mark-paid-manual, or cancel (which deletes the sale). Just clear
+        // pendingMpesa so a retry can start fresh.
+        sale.pendingMpesa = undefined;
+        await sale.save();
+        console.log(
+          `[MpesaCallback][POS] STK failed for sale ${sale._id}: ${parsed.resultDesc}`,
+        );
+        return ack();
+      }
+
+      // Storefront: existing behavior — void the sale.
       sale.paymentStatus = "failed";
       sale.status = "voided";
       sale.voidReason = `M-Pesa declined: ${parsed.resultDesc}`;
@@ -81,21 +99,13 @@ async function handleMpesaCallback(req, res) {
       });
       await sale.save();
 
-      console.log(
-        `[MpesaCallback] sale ${sale._id} failed: ${parsed.resultDesc} (code ${parsed.resultCode})`,
-      );
-
-      // Fire-and-forget failure email
       if (sale.customerEmail && org) {
-        sendStorefrontPaymentFailed(
-          sale.customerEmail,
-          sale.toObject(),
-          org,
-        ).catch((err) =>
-          console.error(
-            "[MpesaCallback] payment-failed email failed:",
-            err.message,
-          ),
+        sendStorefrontPaymentFailed(sale.customerEmail, sale.toObject(), org).catch(
+          (err) =>
+            console.error(
+              "[MpesaCallback] payment-failed email failed:",
+              err.message,
+            ),
         );
       }
 
@@ -112,8 +122,9 @@ async function handleMpesaCallback(req, res) {
     sale.payments.push({
       method: "mpesa",
       amount: paidAmount,
-      status: "completed",
       reference: parsed.mpesaReceiptNumber || null,
+      status: "completed",
+      source: "stk",
       paidAt: new Date(),
     });
 
@@ -125,10 +136,13 @@ async function handleMpesaCallback(req, res) {
       totalPaid >= sale.totalAmount - 0.01 ? "completed" : "partial";
     sale.status = "completed";
     sale.completedAt = new Date();
+    sale.pendingMpesa = undefined;
 
-    // Deduct inventory — storefront orders are always "flexi" items
+    // Deduct inventory. For POS sales nothing was deducted at create-time
+    // (we deferred it). For storefront sales, the original code also
+    // deducted here. Same call for both.
     try {
-      await deductStorefrontInventory(sale);
+      await processInventoryUpdates(sale, sale.organizationId, null);
     } catch (invErr) {
       console.error(
         "[MpesaCallback] inventory deduction failed:",
@@ -140,11 +154,11 @@ async function handleMpesaCallback(req, res) {
     await sale.save();
 
     console.log(
-      `[MpesaCallback] sale ${sale._id} paid: ${paidAmount} KES (receipt ${parsed.mpesaReceiptNumber})`,
+      `[MpesaCallback] sale ${sale._id} paid: ${paidAmount} KES (receipt ${parsed.mpesaReceiptNumber})${isPos ? " [POS]" : ""}`,
     );
 
-    // Fire-and-forget confirmation email
-    if (sale.customerEmail && org) {
+    // Storefront-only: send confirmation email.
+    if (!isPos && sale.customerEmail && org) {
       sendStorefrontOrderConfirmation(
         sale.customerEmail,
         sale.toObject(),
@@ -165,103 +179,6 @@ async function handleMpesaCallback(req, res) {
   }
 }
 
-/**
- * Deduct inventory for a confirmed storefront sale.
- */
-async function deductStorefrontInventory(sale) {
-  const organizationId = sale.organizationId;
-  const locationId = sale.locationId;
-
-  for (let i = 0; i < sale.items.length; i++) {
-    const item = sale.items[i];
-    if (item.type !== "flexi") continue;
-    if (!item.variantId) continue;
-
-    const variant = await Variant.findById(item.variantId)
-      .select("trackInventory continueSellingWhenOutOfStock")
-      .lean();
-
-    if (variant?.trackInventory === false) {
-      sale.inventoryUpdates.push({
-        itemId: String(i),
-        type: "flexi",
-        variantId: item.variantId,
-        productId: item.productId,
-        quantityDeducted: item.quantity,
-        status: "success",
-      });
-      continue;
-    }
-
-    const canOversell = variant?.continueSellingWhenOutOfStock === true;
-
-    const inventory = await Inventory.findOne({
-      organizationId,
-      variantId: item.variantId,
-      locationId,
-    });
-
-    if (!inventory) {
-      sale.inventoryUpdates.push({
-        itemId: String(i),
-        type: "flexi",
-        variantId: item.variantId,
-        productId: item.productId,
-        quantityDeducted: item.quantity,
-        status: "failed",
-        error: `No inventory row for variant ${item.variantId} at location ${locationId}`,
-      });
-      continue;
-    }
-
-    const previousOnHand = inventory.onHand || 0;
-    const previousAvailable = inventory.available ?? inventory.onHand ?? 0;
-
-    if (!canOversell && previousAvailable < item.quantity) {
-      sale.inventoryUpdates.push({
-        itemId: String(i),
-        type: "flexi",
-        variantId: item.variantId,
-        productId: item.productId,
-        quantityDeducted: item.quantity,
-        status: "failed",
-        error: `Insufficient stock (available ${previousAvailable}, requested ${item.quantity}) — customer was charged, reconcile manually`,
-      });
-      continue;
-    }
-
-    const newOnHand = previousOnHand - item.quantity;
-    const newAvailable = previousAvailable - item.quantity;
-
-    await Inventory.updateOne(
-      { _id: inventory._id },
-      {
-        $set: {
-          onHand: newOnHand,
-          available: newAvailable,
-          lastModified: new Date(),
-        },
-      },
-    );
-
-    sale.inventoryUpdates.push({
-      itemId: String(i),
-      type: "flexi",
-      variantId: item.variantId,
-      productId: item.productId,
-      quantityDeducted: item.quantity,
-      previousStock: previousOnHand,
-      newStock: newOnHand,
-      status: "success",
-    });
-  }
-
-  sale.inventoryStatus = sale.inventoryUpdates.every(
-    (u) => u.status === "success",
-  )
-    ? "completed"
-    : "partial";
-}
 
 router.post("/mpesa/callback", handleMpesaCallback);
 
