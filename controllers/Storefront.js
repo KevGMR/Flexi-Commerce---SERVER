@@ -29,9 +29,10 @@ function resolvePaymentMethods(org, location) {
   const locPM = Array.isArray(location?.paymentMethods)
     ? location.paymentMethods
     : [];
+  const websitePM = org?.website?.paymentMethods;
   const orgPM =
-    Array.isArray(org?.paymentMethods) && org.paymentMethods.length > 0
-      ? org.paymentMethods
+    Array.isArray(websitePM) && websitePM.length > 0
+      ? websitePM
       : defaultOrgPaymentMethods();
   const source = locPM.length > 0 ? locPM : orgPM;
 

@@ -2,6 +2,7 @@
 
 const express = require("express");
 const router = express.Router();
+const mongoose = require("mongoose");
 
 const Location = require("../models/Location");
 const ShopifyConnection = require("../models/ShopifyConnection");
@@ -12,18 +13,13 @@ const { getAccessToken } = require("../data/shopifyAuth");
 
 const VALID_TAX_MODES = ["inclusive", "exclusive"];
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 /**
  * Validate an array of payment-method payloads.
  * Returns { ok: true, value: [...] } or { ok: false, error }.
- * Never trusts client input. Enforces:
- *   - array
- *   - max 20 entries
- *   - key: /^[a-z][a-z0-9_]{0,39}$/, unique per array
- *   - label: required, max 40 chars after trim
- *   - icon: string, max 300 chars after trim (may be empty)
- *   - enabled: boolean, default true
- *   - isDefault: boolean, at most one true in the array
- *   - custom: boolean, default false
  */
 function validatePaymentMethods(input) {
   if (input === undefined) return { ok: true, value: undefined };
@@ -91,10 +87,6 @@ function validatePaymentMethods(input) {
   return { ok: true, value: cleaned };
 }
 
-/**
- * Validate the mpesaStkEnabled payload.
- * Accepts true, false, or null (inherit).
- */
 function validateMpesaStkEnabled(input) {
   if (input === undefined) return { ok: true, value: undefined };
   if (input === null) return { ok: true, value: null };
@@ -106,9 +98,17 @@ function validateMpesaStkEnabled(input) {
 }
 
 /**
- * Create location
- * POST /locations
+ * Guard helper — returns true if the param is a valid ObjectId.
+ * Handlers use `if (!isValidId(req.params.id)) return badRequest(res, "location");`
  */
+function isValidId(value) {
+  return typeof value === "string" && mongoose.Types.ObjectId.isValid(value);
+}
+
+// ---------------------------------------------------------------------------
+// Create location
+// POST /locations
+// ---------------------------------------------------------------------------
 router.post("/", verifyToken, async (req, res) => {
   try {
     const organizationId = req.user.organizationId;
@@ -132,7 +132,6 @@ router.post("/", verifyToken, async (req, res) => {
       return res.status(400).json({ error: "name and locationType are required" });
     }
 
-    // Validate payment methods + STK override before doing anything
     const pmCheck = validatePaymentMethods(paymentMethods);
     if (!pmCheck.ok) {
       return res.status(400).json({ error: pmCheck.error });
@@ -142,7 +141,6 @@ router.post("/", verifyToken, async (req, res) => {
       return res.status(400).json({ error: stkCheck.error });
     }
 
-    // If isDefault, unset other defaults
     if (isDefault) {
       await Location.updateMany({ organizationId }, { isDefault: false });
     }
@@ -193,10 +191,10 @@ router.post("/", verifyToken, async (req, res) => {
   }
 });
 
-/**
- * Get all locations
- * GET /locations
- */
+// ---------------------------------------------------------------------------
+// List locations
+// GET /locations
+// ---------------------------------------------------------------------------
 router.get("/", verifyToken, async (req, res) => {
   try {
     const organizationId = req.user.organizationId;
@@ -220,15 +218,20 @@ router.get("/", verifyToken, async (req, res) => {
   }
 });
 
-/**
- * Get location by ID
- * GET /locations/:id
- */
+// ---------------------------------------------------------------------------
+// Get location by ID
+// GET /locations/:id
+// ---------------------------------------------------------------------------
 router.get("/:id", verifyToken, async (req, res) => {
   try {
     const organizationId = req.user.organizationId;
-    const location = await Location.findOne({ _id: req.params.id, organizationId });
+    const { id } = req.params;
 
+    if (!isValidId(id)) {
+      return res.status(400).json({ error: "Invalid location ID" });
+    }
+
+    const location = await Location.findOne({ _id: id, organizationId });
     if (!location) {
       return res.status(404).json({ error: "Location not found" });
     }
@@ -240,13 +243,19 @@ router.get("/:id", verifyToken, async (req, res) => {
   }
 });
 
-/**
- * Update location
- * PUT /locations/:id
- */
+// ---------------------------------------------------------------------------
+// Update location
+// PUT /locations/:id
+// ---------------------------------------------------------------------------
 router.put("/:id", verifyToken, async (req, res) => {
   try {
     const organizationId = req.user.organizationId;
+    const { id } = req.params;
+
+    if (!isValidId(id)) {
+      return res.status(400).json({ error: "Invalid location ID" });
+    }
+
     const {
       name,
       locationType,
@@ -264,7 +273,6 @@ router.put("/:id", verifyToken, async (req, res) => {
       mpesaStkEnabled,
     } = req.body;
 
-    // Validate payment methods + STK override up front
     const pmCheck = validatePaymentMethods(paymentMethods);
     if (!pmCheck.ok) {
       return res.status(400).json({ error: pmCheck.error });
@@ -274,7 +282,7 @@ router.put("/:id", verifyToken, async (req, res) => {
       return res.status(400).json({ error: stkCheck.error });
     }
 
-    const location = await Location.findOne({ _id: req.params.id, organizationId });
+    const location = await Location.findOne({ _id: id, organizationId });
     if (!location) {
       return res.status(404).json({ error: "Location not found" });
     }
@@ -334,28 +342,46 @@ router.put("/:id", verifyToken, async (req, res) => {
   }
 });
 
-/**
- * Delete location
- * DELETE /locations/:id
- */
+// ---------------------------------------------------------------------------
+// Delete location
+// DELETE /locations/:id
+// ---------------------------------------------------------------------------
 router.delete("/:id", verifyToken, async (req, res) => {
   try {
     const organizationId = req.user.organizationId;
+    const { id } = req.params;
 
-    // Check if other locations exist
-    const otherLocations = await Location.countDocuments({ organizationId, _id: { $ne: req.params.id } });
-    if (otherLocations === 0) {
-      return res.status(400).json({ error: "Cannot delete the only location. Organization must have at least one location." });
+    if (!isValidId(id)) {
+      return res.status(400).json({ error: "Invalid location ID" });
     }
 
-    const location = await Location.findOneAndDelete({ _id: req.params.id, organizationId });
+    const otherLocations = await Location.countDocuments({
+      organizationId,
+      _id: { $ne: id },
+    });
+    if (otherLocations === 0) {
+      return res.status(400).json({
+        error:
+          "Cannot delete the only location. Organization must have at least one location.",
+      });
+    }
+
+    const location = await Location.findOneAndDelete({
+      _id: id,
+      organizationId,
+    });
     if (!location) {
       return res.status(404).json({ error: "Location not found" });
     }
 
-    await logTokenEvent(req.user.userId, organizationId, "location_deleted", req.ip, req.get("user-agent"), {
-      details: `Location deleted: ${location.name}`,
-    });
+    await logTokenEvent(
+      req.user.userId,
+      organizationId,
+      "location_deleted",
+      req.ip,
+      req.get("user-agent"),
+      { details: `Location deleted: ${location.name}` },
+    );
 
     return res.status(200).json({ message: "Location deleted" });
   } catch (error) {
@@ -364,17 +390,15 @@ router.delete("/:id", verifyToken, async (req, res) => {
   }
 });
 
-/**
- * GET /locations/shopify/available-locations
- * List available Shopify locations for mapping
- */
+// ---------------------------------------------------------------------------
+// GET /locations/shopify/available-locations
+// ---------------------------------------------------------------------------
 router.get("/shopify/available-locations", verifyToken, async (req, res) => {
   try {
     const organizationId = req.user.organizationId;
 
-    // Get Shopify connection
     const connection = await ShopifyConnection.findOne({ organizationId })
-      .select('+clientId +clientSecret +accessToken +tokenExpiresAt');
+      .select("+clientId +clientSecret +accessToken +tokenExpiresAt");
 
     if (!connection) {
       return res.status(400).json({
@@ -382,15 +406,13 @@ router.get("/shopify/available-locations", verifyToken, async (req, res) => {
       });
     }
 
-    // Get access token
     const { accessToken } = await getAccessToken(
       connection.storeUrl,
       connection.clientId,
       connection.clientSecret,
-      organizationId
+      organizationId,
     );
 
-    // Query Shopify locations
     const url = `https://${connection.storeUrl}/admin/api/${connection.apiVersion}/graphql.json`;
     const query = `
       query locations {
@@ -415,10 +437,10 @@ router.get("/shopify/available-locations", verifyToken, async (req, res) => {
       { query },
       {
         headers: {
-          'X-Shopify-Access-Token': accessToken,
-          'Content-Type': 'application/json',
+          "X-Shopify-Access-Token": accessToken,
+          "Content-Type": "application/json",
         },
-      }
+      },
     );
 
     if (data.errors) {
@@ -429,8 +451,8 @@ router.get("/shopify/available-locations", verifyToken, async (req, res) => {
       id: node.id,
       name: node.name,
       isActive: node.isActive,
-      address: node.address?.address1 || '',
-      city: node.address?.city || '',
+      address: node.address?.address1 || "",
+      city: node.address?.city || "",
     }));
 
     return res.status(200).json({
@@ -439,17 +461,24 @@ router.get("/shopify/available-locations", verifyToken, async (req, res) => {
     });
   } catch (error) {
     console.error("Fetch Shopify locations error:", error);
-    return res.status(500).json({ error: error.message || "Failed to fetch Shopify locations" });
+    return res
+      .status(500)
+      .json({ error: error.message || "Failed to fetch Shopify locations" });
   }
 });
 
-/**
- * POST /locations/:id/set-shopify-location
- * Map FLEXI location to Shopify location
- */
+// ---------------------------------------------------------------------------
+// POST /locations/:id/set-shopify-location
+// ---------------------------------------------------------------------------
 router.post("/:id/set-shopify-location", verifyToken, async (req, res) => {
   try {
     const organizationId = req.user.organizationId;
+    const { id } = req.params;
+
+    if (!isValidId(id)) {
+      return res.status(400).json({ error: "Invalid location ID" });
+    }
+
     const { shopifyLocationId, shopifyLocationName } = req.body;
 
     if (!shopifyLocationId || !shopifyLocationName) {
@@ -458,27 +487,31 @@ router.post("/:id/set-shopify-location", verifyToken, async (req, res) => {
       });
     }
 
-    // Verify location belongs to org
-    const location = await Location.findOne({ _id: req.params.id, organizationId });
+    const location = await Location.findOne({ _id: id, organizationId });
     if (!location) {
       return res.status(404).json({ error: "Location not found" });
     }
 
-    // Verify Shopify connection exists
     const connection = await ShopifyConnection.findOne({ organizationId });
     if (!connection) {
       return res.status(400).json({ error: "No Shopify connection found" });
     }
 
-    // Update location with Shopify mapping
     location.shopifyLocationId = shopifyLocationId;
     location.shopifyLocationName = shopifyLocationName;
     location.shopifyLocationActive = true;
     await location.save();
 
-    await logTokenEvent(req.user.userId, organizationId, "location_updated", req.ip, req.get("user-agent"), {
-      details: `Location ${location.name} mapped to Shopify location ${shopifyLocationName}`,
-    });
+    await logTokenEvent(
+      req.user.userId,
+      organizationId,
+      "location_updated",
+      req.ip,
+      req.get("user-agent"),
+      {
+        details: `Location ${location.name} mapped to Shopify location ${shopifyLocationName}`,
+      },
+    );
 
     return res.status(200).json({
       success: true,
@@ -491,14 +524,18 @@ router.post("/:id/set-shopify-location", verifyToken, async (req, res) => {
   }
 });
 
-/**
- * Update receipt customization for a location
- * PATCH /locations/:id/receipt
- */
+// ---------------------------------------------------------------------------
+// PATCH /locations/:id/receipt
+// ---------------------------------------------------------------------------
 router.patch("/:id/receipt", verifyToken, async (req, res) => {
   try {
     const organizationId = req.user.organizationId;
     const { id } = req.params;
+
+    if (!isValidId(id)) {
+      return res.status(400).json({ error: "Invalid location ID" });
+    }
+
     const {
       logoUrl,
       headerLines,
@@ -523,15 +560,12 @@ router.patch("/:id/receipt", verifyToken, async (req, res) => {
       return res.status(404).json({ error: "Location not found" });
     }
 
-    // Initialize receipt object if it doesn't exist yet
     if (!location.receipt) {
       location.receipt = {};
     }
     const r = location.receipt;
 
-    // String fields — validate length
-    const str = (v, max) =>
-      typeof v === "string" ? v.slice(0, max) : null;
+    const str = (v, max) => (typeof v === "string" ? v.slice(0, max) : null);
 
     if (logoUrl !== undefined) {
       const v = str(logoUrl, 600);
@@ -569,7 +603,6 @@ router.patch("/:id/receipt", verifyToken, async (req, res) => {
       r.customTaxIdLabel = v;
     }
 
-    // Numeric word-clamp fields
     const numField = (name, value) => {
       const n = Number(value);
       if (!Number.isFinite(n) || n < 0 || n > 50) {
@@ -590,7 +623,6 @@ router.patch("/:id/receipt", verifyToken, async (req, res) => {
       r.locationAddressMaxWords = r2.value;
     }
 
-    // Array fields
     if (headerLines !== undefined) {
       if (!Array.isArray(headerLines)) {
         return res
@@ -615,7 +647,6 @@ router.patch("/:id/receipt", verifyToken, async (req, res) => {
         .map((p) => p.slice(0, 300));
     }
 
-    // Boolean toggles
     const toggles = [
       "showReceiptTitle",
       "showOrganizationName",
@@ -632,9 +663,7 @@ router.patch("/:id/receipt", verifyToken, async (req, res) => {
     for (const key of toggles) {
       if (req.body[key] !== undefined) {
         if (typeof req.body[key] !== "boolean") {
-          return res
-            .status(400)
-            .json({ error: `${key} must be a boolean` });
+          return res.status(400).json({ error: `${key} must be a boolean` });
         }
         r[key] = req.body[key];
       }
@@ -664,14 +693,18 @@ router.patch("/:id/receipt", verifyToken, async (req, res) => {
   }
 });
 
-/**
- * Update delivery fee settings for a location
- * PATCH /locations/:id/delivery-settings
- */
+// ---------------------------------------------------------------------------
+// PATCH /locations/:id/delivery-settings
+// ---------------------------------------------------------------------------
 router.patch("/:id/delivery-settings", verifyToken, async (req, res) => {
   try {
     const organizationId = req.user.organizationId;
     const { id } = req.params;
+
+    if (!isValidId(id)) {
+      return res.status(400).json({ error: "Invalid location ID" });
+    }
+
     const {
       enableDeliveryFees,
       taxDeliveryFees,
@@ -683,12 +716,10 @@ router.patch("/:id/delivery-settings", verifyToken, async (req, res) => {
     } = req.body;
 
     const location = await Location.findOne({ _id: id, organizationId });
-
     if (!location) {
       return res.status(404).json({ error: "Location not found" });
     }
 
-    // Update delivery settings
     if (enableDeliveryFees !== undefined)
       location.deliveryFeeSettings.enableDeliveryFees = enableDeliveryFees;
     if (taxDeliveryFees !== undefined)
@@ -712,9 +743,7 @@ router.patch("/:id/delivery-settings", verifyToken, async (req, res) => {
       "location_updated",
       req.ip,
       req.get("user-agent"),
-      {
-        details: `Delivery settings updated for location: ${location.name}`,
-      }
+      { details: `Delivery settings updated for location: ${location.name}` },
     );
 
     return res.json({
@@ -728,44 +757,50 @@ router.patch("/:id/delivery-settings", verifyToken, async (req, res) => {
   }
 });
 
-/**
- * Create delivery category for a location
- * POST /locations/:id/delivery-categories
- */
+// ---------------------------------------------------------------------------
+// POST /locations/:id/delivery-categories
+// ---------------------------------------------------------------------------
 router.post("/:id/delivery-categories", verifyToken, async (req, res) => {
   try {
     const organizationId = req.user.organizationId;
     const { id } = req.params;
-    const {
-      categoryName,
-      description,
-      statusWorkflow,
-      childOptions,
-    } = req.body;
 
-    // Validate required fields
-    if (!categoryName) {
-      return res.status(400).json({
-        success: false,
-        message: "categoryName is required",
-      });
+    if (!isValidId(id)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid location ID" });
     }
 
-    if (!statusWorkflow || !Array.isArray(statusWorkflow) || statusWorkflow.length === 0) {
+    const { categoryName, description, statusWorkflow, childOptions } = req.body;
+
+    if (!categoryName) {
+      return res
+        .status(400)
+        .json({ success: false, message: "categoryName is required" });
+    }
+
+    if (
+      !statusWorkflow ||
+      !Array.isArray(statusWorkflow) ||
+      statusWorkflow.length === 0
+    ) {
       return res.status(400).json({
         success: false,
         message: "statusWorkflow is required and must be a non-empty array",
       });
     }
 
-    if (!childOptions || !Array.isArray(childOptions) || childOptions.length === 0) {
+    if (
+      !childOptions ||
+      !Array.isArray(childOptions) ||
+      childOptions.length === 0
+    ) {
       return res.status(400).json({
         success: false,
         message: "childOptions is required and must be a non-empty array",
       });
     }
 
-    // Validate status workflow
     for (let i = 0; i < statusWorkflow.length; i++) {
       const wf = statusWorkflow[i];
       if (!wf.status || !wf.displayName) {
@@ -776,7 +811,6 @@ router.post("/:id/delivery-categories", verifyToken, async (req, res) => {
       }
     }
 
-    // Validate child options
     for (let i = 0; i < childOptions.length; i++) {
       const opt = childOptions[i];
       if (!opt.optionName || typeof opt.price !== "number" || opt.price < 0) {
@@ -788,7 +822,6 @@ router.post("/:id/delivery-categories", verifyToken, async (req, res) => {
     }
 
     const location = await Location.findOne({ _id: id, organizationId });
-
     if (!location) {
       return res.status(404).json({
         success: false,
@@ -796,9 +829,8 @@ router.post("/:id/delivery-categories", verifyToken, async (req, res) => {
       });
     }
 
-    // Check if category already exists
     const categoryExists = location.deliveryCategories?.some(
-      (cat) => cat.categoryName === categoryName
+      (cat) => cat.categoryName === categoryName,
     );
 
     if (categoryExists) {
@@ -808,14 +840,12 @@ router.post("/:id/delivery-categories", verifyToken, async (req, res) => {
       });
     }
 
-    // Initialize deliveryCategories array if it doesn't exist
     if (!location.deliveryCategories) {
       location.deliveryCategories = [];
     }
 
-    // Create new category with child options
     const newCategory = {
-      _id: new (require("mongoose")).Types.ObjectId(),
+      _id: new mongoose.Types.ObjectId(),
       categoryName,
       description: description || "",
       isActive: true,
@@ -825,7 +855,7 @@ router.post("/:id/delivery-categories", verifyToken, async (req, res) => {
         order: wf.order || idx,
       })),
       childOptions: childOptions.map((opt) => ({
-        _id: new (require("mongoose")).Types.ObjectId(),
+        _id: new mongoose.Types.ObjectId(),
         optionName: opt.optionName,
         price: opt.price,
         estimatedDays: opt.estimatedDays || 1,
@@ -850,7 +880,7 @@ router.post("/:id/delivery-categories", verifyToken, async (req, res) => {
       req.get("user-agent"),
       {
         details: `Delivery category "${categoryName}" created for location: ${location.name}`,
-      }
+      },
     );
 
     return res.status(201).json({
@@ -868,18 +898,23 @@ router.post("/:id/delivery-categories", verifyToken, async (req, res) => {
   }
 });
 
-/**
- * Get all delivery categories for a location
- * GET /locations/:id/delivery-categories
- */
+// ---------------------------------------------------------------------------
+// GET /locations/:id/delivery-categories
+// ---------------------------------------------------------------------------
 router.get("/:id/delivery-categories", verifyToken, async (req, res) => {
   try {
     const organizationId = req.user.organizationId;
     const { id } = req.params;
+
+    if (!isValidId(id)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid location ID" });
+    }
+
     const { includeInactive = false } = req.query;
 
     const location = await Location.findOne({ _id: id, organizationId });
-
     if (!location) {
       return res.status(404).json({
         success: false,
@@ -888,15 +923,13 @@ router.get("/:id/delivery-categories", verifyToken, async (req, res) => {
     }
 
     let categories = location.deliveryCategories || [];
-
-    // Filter out inactive categories if requested
     if (includeInactive !== "true") {
       categories = categories.filter((cat) => cat.isActive);
     }
 
     return res.status(200).json({
       success: true,
-      categories: categories,
+      categories,
       total: categories.length,
     });
   } catch (error) {
@@ -909,536 +942,611 @@ router.get("/:id/delivery-categories", verifyToken, async (req, res) => {
   }
 });
 
-/**
- * Update delivery category (name, description, status)
- * PATCH /locations/:id/delivery-categories/:categoryId
- */
-router.patch("/:id/delivery-categories/:categoryId", verifyToken, async (req, res) => {
-  try {
-    const organizationId = req.user.organizationId;
-    const { id, categoryId } = req.params;
-    const { categoryName, description, isActive, statusWorkflow } = req.body;
-    const hasUpdatableField =
-      categoryName !== undefined ||
-      description !== undefined ||
-      isActive !== undefined ||
-      statusWorkflow !== undefined;
+// ---------------------------------------------------------------------------
+// PATCH /locations/:id/delivery-categories/:categoryId
+// ---------------------------------------------------------------------------
+router.patch(
+  "/:id/delivery-categories/:categoryId",
+  verifyToken,
+  async (req, res) => {
+    try {
+      const organizationId = req.user.organizationId;
+      const { id, categoryId } = req.params;
 
-    if (!hasUpdatableField) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "No updatable category fields provided. Allowed fields: categoryName, description, isActive, statusWorkflow",
-      });
-    }
+      if (!isValidId(id)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid location ID" });
+      }
+      if (!isValidId(categoryId)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid category ID" });
+      }
 
-    const location = await Location.findOne({ _id: id, organizationId });
+      const { categoryName, description, isActive, statusWorkflow } = req.body;
+      const hasUpdatableField =
+        categoryName !== undefined ||
+        description !== undefined ||
+        isActive !== undefined ||
+        statusWorkflow !== undefined;
 
-    if (!location) {
-      return res.status(404).json({
-        success: false,
-        message: "Location not found or does not belong to this organization",
-      });
-    }
+      if (!hasUpdatableField) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "No updatable category fields provided. Allowed fields: categoryName, description, isActive, statusWorkflow",
+        });
+      }
 
-    const category = location.deliveryCategories?.find(
-      (cat) => cat._id.toString() === categoryId
-    );
+      const location = await Location.findOne({ _id: id, organizationId });
+      if (!location) {
+        return res.status(404).json({
+          success: false,
+          message: "Location not found or does not belong to this organization",
+        });
+      }
 
-    if (!category) {
-      return res.status(404).json({
-        success: false,
-        message: "Delivery category not found",
-      });
-    }
+      const category = location.deliveryCategories?.find(
+        (cat) => cat._id.toString() === categoryId,
+      );
 
-    // Update fields
-    if (categoryName !== undefined) category.categoryName = categoryName;
-    if (description !== undefined) category.description = description;
-    if (isActive !== undefined) category.isActive = isActive;
-    if (statusWorkflow !== undefined && Array.isArray(statusWorkflow)) {
-      // Validate workflow
-      for (let i = 0; i < statusWorkflow.length; i++) {
-        const wf = statusWorkflow[i];
-        if (!wf.status || !wf.displayName) {
-          return res.status(400).json({
-            success: false,
-            message: `Status workflow item at index ${i} must have 'status' and 'displayName'`,
-          });
+      if (!category) {
+        return res.status(404).json({
+          success: false,
+          message: "Delivery category not found",
+        });
+      }
+
+      if (categoryName !== undefined) category.categoryName = categoryName;
+      if (description !== undefined) category.description = description;
+      if (isActive !== undefined) category.isActive = isActive;
+      if (statusWorkflow !== undefined && Array.isArray(statusWorkflow)) {
+        for (let i = 0; i < statusWorkflow.length; i++) {
+          const wf = statusWorkflow[i];
+          if (!wf.status || !wf.displayName) {
+            return res.status(400).json({
+              success: false,
+              message: `Status workflow item at index ${i} must have 'status' and 'displayName'`,
+            });
+          }
         }
+        category.statusWorkflow = statusWorkflow.map((wf, idx) => ({
+          status: wf.status,
+          displayName: wf.displayName,
+          order: wf.order || idx,
+        }));
       }
-      category.statusWorkflow = statusWorkflow.map((wf, idx) => ({
-        status: wf.status,
-        displayName: wf.displayName,
-        order: wf.order || idx,
-      }));
-    }
-    category.updatedAt = new Date();
+      category.updatedAt = new Date();
 
-    await location.save();
+      await location.save();
 
-    await logTokenEvent(
-      req.user.userId,
-      organizationId,
-      "delivery_category_updated",
-      req.ip,
-      req.get("user-agent"),
-      {
-        details: `Delivery category "${category.categoryName}" updated for location: ${location.name}`,
-      }
-    );
+      await logTokenEvent(
+        req.user.userId,
+        organizationId,
+        "delivery_category_updated",
+        req.ip,
+        req.get("user-agent"),
+        {
+          details: `Delivery category "${category.categoryName}" updated for location: ${location.name}`,
+        },
+      );
 
-    return res.status(200).json({
-      success: true,
-      message: "Delivery category updated successfully",
-      category: category,
-    });
-  } catch (error) {
-    console.error("Update delivery category error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to update delivery category",
-      error: error.message,
-    });
-  }
-});
-
-/**
- * Delete delivery category
- * DELETE /locations/:id/delivery-categories/:categoryId
- */
-router.delete("/:id/delivery-categories/:categoryId", verifyToken, async (req, res) => {
-  try {
-    const organizationId = req.user.organizationId;
-    const { id, categoryId } = req.params;
-
-    const location = await Location.findOne({ _id: id, organizationId });
-
-    if (!location) {
-      return res.status(404).json({
-        success: false,
-        message: "Location not found or does not belong to this organization",
-      });
-    }
-
-    const categoryIndex = location.deliveryCategories?.findIndex(
-      (cat) => cat._id.toString() === categoryId
-    );
-
-    if (categoryIndex === -1) {
-      return res.status(404).json({
-        success: false,
-        message: "Delivery category not found",
-      });
-    }
-
-    const deletedCategory = location.deliveryCategories[categoryIndex];
-    location.deliveryCategories.splice(categoryIndex, 1);
-    await location.save();
-
-    await logTokenEvent(
-      req.user.userId,
-      organizationId,
-      "delivery_category_deleted",
-      req.ip,
-      req.get("user-agent"),
-      {
-        details: `Delivery category "${deletedCategory.categoryName}" deleted from location: ${location.name}`,
-      }
-    );
-
-    return res.status(200).json({
-      success: true,
-      message: "Delivery category deleted successfully",
-    });
-  } catch (error) {
-    console.error("Delete delivery category error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to delete delivery category",
-      error: error.message,
-    });
-  }
-});
-
-/**
- * Add or update delivery option in a category
- * POST /locations/:id/delivery-categories/:categoryId/options
- */
-router.post("/:id/delivery-categories/:categoryId/options", verifyToken, async (req, res) => {
-  try {
-    const organizationId = req.user.organizationId;
-    const { id, categoryId } = req.params;
-    const {
-      optionName,
-      price,
-      estimatedDays,
-      isActive,
-      description,
-      requiresAddress,
-      requiresLandmark,
-    } = req.body;
-
-    // Validate required fields
-    if (!optionName || typeof price !== "number" || price < 0) {
-      return res.status(400).json({
-        success: false,
-        message: "optionName and price (non-negative number) are required",
-      });
-    }
-
-    const location = await Location.findOne({ _id: id, organizationId });
-
-    if (!location) {
-      return res.status(404).json({
-        success: false,
-        message: "Location not found or does not belong to this organization",
-      });
-    }
-
-    const category = location.deliveryCategories?.find(
-      (cat) => cat._id.toString() === categoryId
-    );
-
-    if (!category) {
-      return res.status(404).json({
-        success: false,
-        message: "Delivery category not found",
-      });
-    }
-
-    // Check if option already exists
-    const optionExists = category.childOptions?.some(
-      (opt) => opt.optionName === optionName
-    );
-
-    if (optionExists) {
-      return res.status(400).json({
-        success: false,
-        message: `Option "${optionName}" already exists in this category`,
-      });
-    }
-
-    // Initialize childOptions array if it doesn't exist
-    if (!category.childOptions) {
-      category.childOptions = [];
-    }
-
-    // Create new option
-    const newOption = {
-      _id: new (require("mongoose")).Types.ObjectId(),
-      optionName,
-      price,
-      estimatedDays: estimatedDays || 1,
-      isActive: isActive !== undefined ? isActive : true,
-      description: description || "",
-      requiresAddress:
-        requiresAddress !== undefined ? requiresAddress : true,
-      requiresLandmark: requiresLandmark === true,
-    };
-
-    category.childOptions.push(newOption);
-    category.updatedAt = new Date();
-    await location.save();
-
-    await logTokenEvent(
-      req.user.userId,
-      organizationId,
-      "delivery_option_created",
-      req.ip,
-      req.get("user-agent"),
-      {
-        details: `Delivery option "${optionName}" added to category "${category.categoryName}" in location: ${location.name}`,
-      }
-    );
-
-    return res.status(201).json({
-      success: true,
-      message: "Delivery option added successfully",
-      option: newOption,
-    });
-  } catch (error) {
-    console.error("Add delivery option error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to add delivery option",
-      error: error.message,
-    });
-  }
-});
-
-/**
- * Update delivery option price and details
- * PATCH /locations/:id/delivery-categories/:categoryId/options/:optionId
- */
-router.patch("/:id/delivery-categories/:categoryId/options/:optionId", verifyToken, async (req, res) => {
-  try {
-    const organizationId = req.user.organizationId;
-    const { id, categoryId, optionId } = req.params;
-    const {
-      optionName,
-      price,
-      estimatedDays,
-      isActive,
-      description,
-      requiresAddress,
-      requiresLandmark,
-    } = req.body;
-    const hasUpdatableField =
-      optionName !== undefined ||
-      price !== undefined ||
-      estimatedDays !== undefined ||
-      isActive !== undefined ||
-      description !== undefined ||
-      requiresAddress !== undefined ||
-      requiresLandmark !== undefined;
-
-    if (!hasUpdatableField) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "No updatable option fields provided. Allowed fields: optionName, price, estimatedDays, isActive, description",
-      });
-    }
-
-    if (optionName !== undefined && (!optionName || optionName.trim() === "")) {
-      return res.status(400).json({
-        success: false,
-        message: "optionName cannot be empty",
-      });
-    }
-
-    if (
-      price !== undefined &&
-      (typeof price !== "number" || Number.isNaN(price) || price < 0)
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: "price must be a non-negative number",
-      });
-    }
-
-    if (
-      estimatedDays !== undefined &&
-      (typeof estimatedDays !== "number" ||
-        Number.isNaN(estimatedDays) ||
-        estimatedDays < 0)
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: "estimatedDays must be a non-negative number",
-      });
-    }
-
-    if (isActive !== undefined && typeof isActive !== "boolean") {
-      return res.status(400).json({
-        success: false,
-        message: "isActive must be a boolean",
-      });
-    }
-
-    if (description !== undefined && typeof description !== "string") {
-      return res.status(400).json({
-        success: false,
-        message: "description must be a string",
-      });
-    }
-
-    const location = await Location.findOne({ _id: id, organizationId });
-
-    if (!location) {
-      return res.status(404).json({
-        success: false,
-        message: "Location not found or does not belong to this organization",
-      });
-    }
-
-    const category = location.deliveryCategories?.find(
-      (cat) => cat._id.toString() === categoryId
-    );
-
-    if (!category) {
-      return res.status(404).json({
-        success: false,
-        message: "Delivery category not found",
-      });
-    }
-
-    const option = category.childOptions?.find(
-      (opt) => opt._id.toString() === optionId
-    );
-
-    if (!option) {
-      return res.status(404).json({
-        success: false,
-        message: "Delivery option not found",
-      });
-    }
-
-    let changed = false;
-
-    if (optionName !== undefined) {
-      const nextOptionName = optionName.trim();
-      if (option.optionName !== nextOptionName) {
-        option.optionName = nextOptionName;
-        changed = true;
-      }
-    }
-
-    if (price !== undefined && option.price !== price) {
-      option.price = price;
-      changed = true;
-    }
-
-    if (estimatedDays !== undefined && option.estimatedDays !== estimatedDays) {
-      option.estimatedDays = estimatedDays;
-      changed = true;
-    }
-
-    if (isActive !== undefined && option.isActive !== isActive) {
-      option.isActive = isActive;
-      changed = true;
-    }
-
-    if (description !== undefined && (option.description || "") !== description) {
-      option.description = description;
-      changed = true;
-    }
-
-    if (
-      requiresAddress !== undefined &&
-      option.requiresAddress !== requiresAddress
-    ) {
-      if (typeof requiresAddress !== "boolean") {
-        return res.status(400).json({
-          success: false,
-          message: "requiresAddress must be a boolean",
-        });
-      }
-      option.requiresAddress = requiresAddress;
-      changed = true;
-    }
-
-    if (
-      requiresLandmark !== undefined &&
-      option.requiresLandmark !== requiresLandmark
-    ) {
-      if (typeof requiresLandmark !== "boolean") {
-        return res.status(400).json({
-          success: false,
-          message: "requiresLandmark must be a boolean",
-        });
-      }
-      option.requiresLandmark = requiresLandmark;
-      changed = true;
-    }
-
-    if (!changed) {
       return res.status(200).json({
         success: true,
-        message: "No changes detected for delivery option",
+        message: "Delivery category updated successfully",
+        category,
+      });
+    } catch (error) {
+      console.error("Update delivery category error:", error);
+      return res.status(500).json({
+        success: false,
+        message: "Failed to update delivery category",
+        error: error.message,
+      });
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// DELETE /locations/:id/delivery-categories/:categoryId
+// ---------------------------------------------------------------------------
+router.delete(
+  "/:id/delivery-categories/:categoryId",
+  verifyToken,
+  async (req, res) => {
+    try {
+      const organizationId = req.user.organizationId;
+      const { id, categoryId } = req.params;
+
+      if (!isValidId(id)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid location ID" });
+      }
+      if (!isValidId(categoryId)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid category ID" });
+      }
+
+      const location = await Location.findOne({ _id: id, organizationId });
+      if (!location) {
+        return res.status(404).json({
+          success: false,
+          message: "Location not found or does not belong to this organization",
+        });
+      }
+
+      const categoryIndex = location.deliveryCategories?.findIndex(
+        (cat) => cat._id.toString() === categoryId,
+      );
+
+      if (categoryIndex === -1) {
+        return res.status(404).json({
+          success: false,
+          message: "Delivery category not found",
+        });
+      }
+
+      const deletedCategory = location.deliveryCategories[categoryIndex];
+      location.deliveryCategories.splice(categoryIndex, 1);
+      await location.save();
+
+      await logTokenEvent(
+        req.user.userId,
+        organizationId,
+        "delivery_category_deleted",
+        req.ip,
+        req.get("user-agent"),
+        {
+          details: `Delivery category "${deletedCategory.categoryName}" deleted from location: ${location.name}`,
+        },
+      );
+
+      return res.status(200).json({
+        success: true,
+        message: "Delivery category deleted successfully",
+      });
+    } catch (error) {
+      console.error("Delete delivery category error:", error);
+      return res.status(500).json({
+        success: false,
+        message: "Failed to delete delivery category",
+        error: error.message,
+      });
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// POST /locations/:id/delivery-categories/:categoryId/options
+// ---------------------------------------------------------------------------
+router.post(
+  "/:id/delivery-categories/:categoryId/options",
+  verifyToken,
+  async (req, res) => {
+    try {
+      const organizationId = req.user.organizationId;
+      const { id, categoryId } = req.params;
+
+      if (!isValidId(id)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid location ID" });
+      }
+      if (!isValidId(categoryId)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid category ID" });
+      }
+
+      const {
+        optionName,
+        price,
+        estimatedDays,
+        isActive,
+        description,
+        requiresAddress,
+        requiresLandmark,
+      } = req.body;
+
+      if (!optionName || typeof price !== "number" || price < 0) {
+        return res.status(400).json({
+          success: false,
+          message: "optionName and price (non-negative number) are required",
+        });
+      }
+
+      const location = await Location.findOne({ _id: id, organizationId });
+      if (!location) {
+        return res.status(404).json({
+          success: false,
+          message: "Location not found or does not belong to this organization",
+        });
+      }
+
+      const category = location.deliveryCategories?.find(
+        (cat) => cat._id.toString() === categoryId,
+      );
+
+      if (!category) {
+        return res.status(404).json({
+          success: false,
+          message: "Delivery category not found",
+        });
+      }
+
+      const optionExists = category.childOptions?.some(
+        (opt) => opt.optionName === optionName,
+      );
+
+      if (optionExists) {
+        return res.status(400).json({
+          success: false,
+          message: `Option "${optionName}" already exists in this category`,
+        });
+      }
+
+      if (!category.childOptions) {
+        category.childOptions = [];
+      }
+
+      const newOption = {
+        _id: new mongoose.Types.ObjectId(),
+        optionName,
+        price,
+        estimatedDays: estimatedDays || 1,
+        isActive: isActive !== undefined ? isActive : true,
+        description: description || "",
+        requiresAddress:
+          requiresAddress !== undefined ? requiresAddress : true,
+        requiresLandmark: requiresLandmark === true,
+      };
+
+      category.childOptions.push(newOption);
+      category.updatedAt = new Date();
+      await location.save();
+
+      await logTokenEvent(
+        req.user.userId,
+        organizationId,
+        "delivery_option_created",
+        req.ip,
+        req.get("user-agent"),
+        {
+          details: `Delivery option "${optionName}" added to category "${category.categoryName}" in location: ${location.name}`,
+        },
+      );
+
+      return res.status(201).json({
+        success: true,
+        message: "Delivery option added successfully",
+        option: newOption,
+      });
+    } catch (error) {
+      console.error("Add delivery option error:", error);
+      return res.status(500).json({
+        success: false,
+        message: "Failed to add delivery option",
+        error: error.message,
+      });
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// PATCH /locations/:id/delivery-categories/:categoryId/options/:optionId
+// ---------------------------------------------------------------------------
+router.patch(
+  "/:id/delivery-categories/:categoryId/options/:optionId",
+  verifyToken,
+  async (req, res) => {
+    try {
+      const organizationId = req.user.organizationId;
+      const { id, categoryId, optionId } = req.params;
+
+      if (!isValidId(id)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid location ID" });
+      }
+      if (!isValidId(categoryId)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid category ID" });
+      }
+      if (!isValidId(optionId)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid option ID" });
+      }
+
+      const {
+        optionName,
+        price,
+        estimatedDays,
+        isActive,
+        description,
+        requiresAddress,
+        requiresLandmark,
+      } = req.body;
+
+      const hasUpdatableField =
+        optionName !== undefined ||
+        price !== undefined ||
+        estimatedDays !== undefined ||
+        isActive !== undefined ||
+        description !== undefined ||
+        requiresAddress !== undefined ||
+        requiresLandmark !== undefined;
+
+      if (!hasUpdatableField) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "No updatable option fields provided. Allowed fields: optionName, price, estimatedDays, isActive, description",
+        });
+      }
+
+      if (optionName !== undefined && (!optionName || optionName.trim() === "")) {
+        return res.status(400).json({
+          success: false,
+          message: "optionName cannot be empty",
+        });
+      }
+
+      if (
+        price !== undefined &&
+        (typeof price !== "number" || Number.isNaN(price) || price < 0)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "price must be a non-negative number",
+        });
+      }
+
+      if (
+        estimatedDays !== undefined &&
+        (typeof estimatedDays !== "number" ||
+          Number.isNaN(estimatedDays) ||
+          estimatedDays < 0)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "estimatedDays must be a non-negative number",
+        });
+      }
+
+      if (isActive !== undefined && typeof isActive !== "boolean") {
+        return res.status(400).json({
+          success: false,
+          message: "isActive must be a boolean",
+        });
+      }
+
+      if (description !== undefined && typeof description !== "string") {
+        return res.status(400).json({
+          success: false,
+          message: "description must be a string",
+        });
+      }
+
+      const location = await Location.findOne({ _id: id, organizationId });
+      if (!location) {
+        return res.status(404).json({
+          success: false,
+          message: "Location not found or does not belong to this organization",
+        });
+      }
+
+      const category = location.deliveryCategories?.find(
+        (cat) => cat._id.toString() === categoryId,
+      );
+
+      if (!category) {
+        return res.status(404).json({
+          success: false,
+          message: "Delivery category not found",
+        });
+      }
+
+      const option = category.childOptions?.find(
+        (opt) => opt._id.toString() === optionId,
+      );
+
+      if (!option) {
+        return res.status(404).json({
+          success: false,
+          message: "Delivery option not found",
+        });
+      }
+
+      let changed = false;
+
+      if (optionName !== undefined) {
+        const nextOptionName = optionName.trim();
+        if (option.optionName !== nextOptionName) {
+          option.optionName = nextOptionName;
+          changed = true;
+        }
+      }
+
+      if (price !== undefined && option.price !== price) {
+        option.price = price;
+        changed = true;
+      }
+
+      if (estimatedDays !== undefined && option.estimatedDays !== estimatedDays) {
+        option.estimatedDays = estimatedDays;
+        changed = true;
+      }
+
+      if (isActive !== undefined && option.isActive !== isActive) {
+        option.isActive = isActive;
+        changed = true;
+      }
+
+      if (
+        description !== undefined &&
+        (option.description || "") !== description
+      ) {
+        option.description = description;
+        changed = true;
+      }
+
+      if (
+        requiresAddress !== undefined &&
+        option.requiresAddress !== requiresAddress
+      ) {
+        if (typeof requiresAddress !== "boolean") {
+          return res.status(400).json({
+            success: false,
+            message: "requiresAddress must be a boolean",
+          });
+        }
+        option.requiresAddress = requiresAddress;
+        changed = true;
+      }
+
+      if (
+        requiresLandmark !== undefined &&
+        option.requiresLandmark !== requiresLandmark
+      ) {
+        if (typeof requiresLandmark !== "boolean") {
+          return res.status(400).json({
+            success: false,
+            message: "requiresLandmark must be a boolean",
+          });
+        }
+        option.requiresLandmark = requiresLandmark;
+        changed = true;
+      }
+
+      if (!changed) {
+        return res.status(200).json({
+          success: true,
+          message: "No changes detected for delivery option",
+          option,
+        });
+      }
+
+      category.updatedAt = new Date();
+      await location.save();
+
+      await logTokenEvent(
+        req.user.userId,
+        organizationId,
+        "delivery_option_updated",
+        req.ip,
+        req.get("user-agent"),
+        {
+          details: `Delivery option "${option.optionName}" updated in category "${category.categoryName}" in location: ${location.name}`,
+        },
+      );
+
+      return res.status(200).json({
+        success: true,
+        message: "Delivery option updated successfully",
         option,
       });
+    } catch (error) {
+      console.error("Update delivery option error:", error);
+      return res.status(500).json({
+        success: false,
+        message: "Failed to update delivery option",
+        error: error.message,
+      });
     }
+  },
+);
 
-    category.updatedAt = new Date();
+// ---------------------------------------------------------------------------
+// DELETE /locations/:id/delivery-categories/:categoryId/options/:optionId
+// ---------------------------------------------------------------------------
+router.delete(
+  "/:id/delivery-categories/:categoryId/options/:optionId",
+  verifyToken,
+  async (req, res) => {
+    try {
+      const organizationId = req.user.organizationId;
+      const { id, categoryId, optionId } = req.params;
 
-    await location.save();
-
-    await logTokenEvent(
-      req.user.userId,
-      organizationId,
-      "delivery_option_updated",
-      req.ip,
-      req.get("user-agent"),
-      {
-        details: `Delivery option "${option.optionName}" updated in category "${category.categoryName}" in location: ${location.name}`,
+      if (!isValidId(id)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid location ID" });
       }
-    );
-
-    return res.status(200).json({
-      success: true,
-      message: "Delivery option updated successfully",
-      option: option,
-    });
-  } catch (error) {
-    console.error("Update delivery option error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to update delivery option",
-      error: error.message,
-    });
-  }
-});
-
-/**
- * Delete delivery option from category
- * DELETE /locations/:id/delivery-categories/:categoryId/options/:optionId
- */
-router.delete("/:id/delivery-categories/:categoryId/options/:optionId", verifyToken, async (req, res) => {
-  try {
-    const organizationId = req.user.organizationId;
-    const { id, categoryId, optionId } = req.params;
-
-    const location = await Location.findOne({ _id: id, organizationId });
-
-    if (!location) {
-      return res.status(404).json({
-        success: false,
-        message: "Location not found or does not belong to this organization",
-      });
-    }
-
-    const category = location.deliveryCategories?.find(
-      (cat) => cat._id.toString() === categoryId
-    );
-
-    if (!category) {
-      return res.status(404).json({
-        success: false,
-        message: "Delivery category not found",
-      });
-    }
-
-    const optionIndex = category.childOptions?.findIndex(
-      (opt) => opt._id.toString() === optionId
-    );
-
-    if (optionIndex === -1) {
-      return res.status(404).json({
-        success: false,
-        message: "Delivery option not found",
-      });
-    }
-
-    const deletedOption = category.childOptions[optionIndex];
-    category.childOptions.splice(optionIndex, 1);
-    category.updatedAt = new Date();
-    await location.save();
-
-    await logTokenEvent(
-      req.user.userId,
-      organizationId,
-      "delivery_option_deleted",
-      req.ip,
-      req.get("user-agent"),
-      {
-        details: `Delivery option "${deletedOption.optionName}" deleted from category "${category.categoryName}" in location: ${location.name}`,
+      if (!isValidId(categoryId)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid category ID" });
       }
-    );
+      if (!isValidId(optionId)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid option ID" });
+      }
 
-    return res.status(200).json({
-      success: true,
-      message: "Delivery option deleted successfully",
-    });
-  } catch (error) {
-    console.error("Delete delivery option error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to delete delivery option",
-      error: error.message,
-    });
-  }
-});
+      const location = await Location.findOne({ _id: id, organizationId });
+      if (!location) {
+        return res.status(404).json({
+          success: false,
+          message: "Location not found or does not belong to this organization",
+        });
+      }
+
+      const category = location.deliveryCategories?.find(
+        (cat) => cat._id.toString() === categoryId,
+      );
+
+      if (!category) {
+        return res.status(404).json({
+          success: false,
+          message: "Delivery category not found",
+        });
+      }
+
+      const optionIndex = category.childOptions?.findIndex(
+        (opt) => opt._id.toString() === optionId,
+      );
+
+      if (optionIndex === -1) {
+        return res.status(404).json({
+          success: false,
+          message: "Delivery option not found",
+        });
+      }
+
+      const deletedOption = category.childOptions[optionIndex];
+      category.childOptions.splice(optionIndex, 1);
+      category.updatedAt = new Date();
+      await location.save();
+
+      await logTokenEvent(
+        req.user.userId,
+        organizationId,
+        "delivery_option_deleted",
+        req.ip,
+        req.get("user-agent"),
+        {
+          details: `Delivery option "${deletedOption.optionName}" deleted from category "${category.categoryName}" in location: ${location.name}`,
+        },
+      );
+
+      return res.status(200).json({
+        success: true,
+        message: "Delivery option deleted successfully",
+      });
+    } catch (error) {
+      console.error("Delete delivery option error:", error);
+      return res.status(500).json({
+        success: false,
+        message: "Failed to delete delivery option",
+        error: error.message,
+      });
+    }
+  },
+);
 
 module.exports = router;

@@ -38,12 +38,6 @@ const organizationSchema = new Schema(
       },
     },
 
-    // Org-level default payment methods. Locations may override.
-    paymentMethods: {
-      type: [paymentMethodSchema],
-      default: defaultOrgPaymentMethods,
-    },
-
     // Website builder placeholder
 
     // Website / storefront
@@ -77,6 +71,11 @@ const organizationSchema = new Schema(
         href: { type: String, default: "" },
         isActive: { type: Boolean, default: true },
       },
+
+      paymentMethods: {
+        type: [paymentMethodSchema],
+        default: defaultOrgPaymentMethods,
+      },  
 
       // NEW — homepage builder
       homepage: {

@@ -1,17 +1,14 @@
 #!/usr/bin/env node
 /**
- * Batch A migration.
- *   1. Add paymentMethods to every Organization that doesn't have them.
- *   2. Ensure Location.paymentMethods defaults to [] and mpesaStkEnabled
- *      to null on every location (Mongoose defaults handle this on write,
- *      but existing docs need an explicit pass to make queries reliable).
- *   3. Verify all DeliveryFee docs have saleId populated.
+ * Batch A part 2 — move Organization.paymentMethods into website.paymentMethods.
  *
- * Idempotent. Safe to re-run.
+ * Idempotent: re-running is safe. If a doc already has website.paymentMethods
+ * and no top-level paymentMethods, it's skipped. If both exist, website wins
+ * and the top-level is unset.
  *
  * Usage:
- *   node scripts/migrate-batch-a.js              # dry run
- *   node scripts/migrate-batch-a.js --apply      # write
+ *   node scripts/migrate-batch-a2.js           # dry run
+ *   node scripts/migrate-batch-a2.js --apply   # write
  */
 
 const dns = require("dns");
@@ -23,7 +20,7 @@ const mongoose = require("mongoose");
 const APPLY = process.argv.includes("--apply");
 const uri = process.env.PROD_MONGO_URI;
 if (!uri) {
-  console.error("PROD_MONGO_URI not set in server/.env");
+  console.error("PROD_MONGO_URI not set");
   process.exit(1);
 }
 const isLocal = /localhost|127\.0\.0\.1/.test(uri);
@@ -31,8 +28,6 @@ if (isLocal && !process.argv.includes("--force-local")) {
   console.error("PROD_MONGO_URI looks local. Pass --force-local to override.");
   process.exit(1);
 }
-
-const { defaultOrgPaymentMethods } = require("../models/PaymentMethod");
 
 (async () => {
   console.log(`Mode: ${APPLY ? "APPLY (writing)" : "DRY RUN (no writes)"}`);
@@ -44,83 +39,69 @@ const { defaultOrgPaymentMethods } = require("../models/PaymentMethod");
     family: 4 
   });
   const db = mongoose.connection.db;
-
   const orgs = db.collection("organizations");
-  const locations = db.collection("locations");
-  const deliveryfees = db.collection("deliveryfees");
 
-  // 1. Orgs without paymentMethods
-  const orgsNeeding = await orgs.countDocuments({
-    $or: [
-      { paymentMethods: { $exists: false } },
-      { paymentMethods: { $size: 0 } },
-    ],
-  });
-  console.log(`Orgs without paymentMethods: ${orgsNeeding}`);
-  if (APPLY && orgsNeeding > 0) {
-    const res = await orgs.updateMany(
-      {
-        $or: [
-          { paymentMethods: { $exists: false } },
-          { paymentMethods: { $size: 0 } },
-        ],
-      },
-      { $set: { paymentMethods: defaultOrgPaymentMethods() } },
-    );
-    console.log(`  → updated ${res.modifiedCount}`);
-  }
+  const all = await orgs.find({}).toArray();
+  let moved = 0;
+  let skipped = 0;
+  let conflicted = 0;
 
-  // 2. Orgs without daraja.mpesaStkEnabled
-  const orgsNeedingStk = await orgs.countDocuments({
-    "daraja.mpesaStkEnabled": { $exists: false },
-  });
-  console.log(`Orgs without daraja.mpesaStkEnabled: ${orgsNeedingStk}`);
-  if (APPLY && orgsNeedingStk > 0) {
-    const res = await orgs.updateMany(
-      { "daraja.mpesaStkEnabled": { $exists: false } },
-      { $set: { "daraja.mpesaStkEnabled": false } },
-    );
-    console.log(`  → updated ${res.modifiedCount}`);
-  }
+  for (const org of all) {
+    const topLevel = org.paymentMethods;
+    const nested = org.website?.paymentMethods;
 
-  // 3. Locations without paymentMethods (empty array is fine, but absent is not)
-  const locsNeeding = await locations.countDocuments({
-    paymentMethods: { $exists: false },
-  });
-  console.log(`Locations without paymentMethods field: ${locsNeeding}`);
-  if (APPLY && locsNeeding > 0) {
-    const res = await locations.updateMany(
-      { paymentMethods: { $exists: false } },
-      { $set: { paymentMethods: [] } },
-    );
-    console.log(`  → updated ${res.modifiedCount}`);
-  }
+    const hasTop = Array.isArray(topLevel) && topLevel.length > 0;
+    const hasNested = Array.isArray(nested) && nested.length > 0;
 
-  // 4. Locations without mpesaStkEnabled
-  const locsNeedingStk = await locations.countDocuments({
-    mpesaStkEnabled: { $exists: false },
-  });
-  console.log(`Locations without mpesaStkEnabled field: ${locsNeedingStk}`);
-  if (APPLY && locsNeedingStk > 0) {
-    const res = await locations.updateMany(
-      { mpesaStkEnabled: { $exists: false } },
-      { $set: { mpesaStkEnabled: null } },
-    );
-    console.log(`  → updated ${res.modifiedCount}`);
-  }
+    if (hasNested && !hasTop) {
+      skipped += 1;
+      console.log(`  ${org.website?.subdomain || org._id}  already migrated`);
+      continue;
+    }
 
-  // 5. DeliveryFee docs missing saleId (should be zero, but verify)
-  const dfMissing = await deliveryfees.countDocuments({ saleId: { $exists: false } });
-  const dfTotal = await deliveryfees.countDocuments({});
-  console.log(`DeliveryFees total: ${dfTotal}  missing saleId: ${dfMissing}`);
-  if (dfMissing > 0) {
+    if (hasNested && hasTop) {
+      conflicted += 1;
+      console.log(
+        `  ${org.website?.subdomain || org._id}  conflict: both exist, keeping website`,
+      );
+      if (APPLY) {
+        await orgs.updateOne(
+          { _id: org._id },
+          { $unset: { paymentMethods: "" } },
+        );
+      }
+      continue;
+    }
+
+    if (!hasTop) {
+      skipped += 1;
+      console.log(
+        `  ${org.website?.subdomain || org._id}  nothing to move (empty top-level)`,
+      );
+      continue;
+    }
+
     console.log(
-      "  ! Some DeliveryFees have no saleId. They may be standalone deliveries.",
+      `  ${org.website?.subdomain || org._id}  moving ${topLevel.length} methods`,
     );
+    if (APPLY) {
+      await orgs.updateOne(
+        { _id: org._id },
+        {
+          $set: { "website.paymentMethods": topLevel },
+          $unset: { paymentMethods: "" },
+        },
+      );
+    }
+    moved += 1;
   }
+
+  console.log(
+    `\nSummary: ${all.length} orgs — ${moved} to move, ${skipped} skipped, ${conflicted} conflicts`,
+  );
 
   await mongoose.disconnect();
-  console.log(APPLY ? "\nDone (applied)." : "\nDone (dry run — pass --apply to write).");
+  console.log(APPLY ? "Done (applied)." : "Done (dry run — pass --apply to write).");
 })().catch((e) => {
   console.error(e);
   process.exit(1);
