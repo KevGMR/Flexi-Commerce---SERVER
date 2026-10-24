@@ -72,7 +72,9 @@ const tokenAuditLogSchema = new Schema(
         "backdate_rolled_back",
         "image_uploaded",
         "domain_added",
-        "domain_removed"
+        "domain_removed",
+        "sale_reassigned",
+        "mpesa_stk_cancelled"
       ],
     },
     permission: {

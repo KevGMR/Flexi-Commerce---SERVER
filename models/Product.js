@@ -111,8 +111,13 @@ const productSchema = new Schema(
         // migration-only traceability
         shopifyImageId: { type: Number },
         pendingUpload: { type: Boolean, default: false },
+        shopifyFileId: { type: String, default: null },   // gid://shopify/MediaImage/...
+        width: { type: Number, default: null },           // NEW
+        height: { type: Number, default: null },          // NEW
       },
     ],
+
+    imageIds: [{ type: Schema.Types.ObjectId, ref: "ProductImage" }],
 
     tags: [String],
     collectionIds: [{ type: Schema.Types.ObjectId, ref: "Collection" }],
@@ -142,6 +147,8 @@ productSchema.index({ organizationId: 1, tags: 1 });
 productSchema.index({ organizationId: 1, collectionIds: 1 });
 productSchema.index({ organizationId: 1, createdAt: -1 });
 productSchema.index({ organizationId: 1, serviceKind: 1 });
+
+productSchema.index({ imageIds: 1 });
 
 // migration-safe uniques
 productSchema.index(

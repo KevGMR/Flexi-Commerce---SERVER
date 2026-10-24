@@ -39,8 +39,14 @@ const variantSchema = new Schema(
         alt: String,
         isDefault: Boolean,
         shopifyFileId: String, // NEW — Shopify Files GID, for cascade deletes
+        shopifyImageNumericId: { type: Number, default: null },
+        width: { type: Number, default: null },
+        height: { type: Number, default: null },
       },
     ],
+
+    imageIds: [{ type: Schema.Types.ObjectId, ref: "ProductImage" }],
+
     metafields: [
       {
         key: String,

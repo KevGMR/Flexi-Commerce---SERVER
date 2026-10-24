@@ -11,7 +11,7 @@ const Receivable = require("../models/Receivable");
 const ShopifyConnection = require("../models/ShopifyConnection");
 const UserOrganization = require("../models/UserOrganization");
 const Organization = require("../models/Organization");
-const Variant = require("../models/Variant")
+const Variant = require("../models/Variant");
 const crypto = require("crypto");
 
 const {
@@ -22,9 +22,10 @@ const Inventory = require("../models/Inventory");
 const Expense = require("../models/Expense");
 const { requirePermission } = require("../middleware/permissionCheck");
 const { validateLocationAccess } = require("../middleware/locationAccess");
-
 const { processInventoryUpdates } = require("../services/inventoryUpdater");
 const { resolvePaymentMethods } = require("./Storefront");
+const secretBox = require("../services/secretBox");
+const { logTokenEvent } = require("../services/auditLogger");
 
 const VALID_TAX_MODES = ["inclusive", "exclusive"];
 const PAYMENT_METHODS = ["cash", "card", "mobile", "check", "credit", "mpesa"];
@@ -32,12 +33,52 @@ const INTERNAL_CREDIT_PAYMENT_METHODS = new Set(["credit"]);
 
 const roundMoney = (value) => Math.round((Number(value) || 0) * 100) / 100;
 
+/**
+ * Normalise any method value a client might send into a value the
+ * Sale.payments[].method enum accepts.
+ *
+ * Enum values: cash | card | mobile | check | credit | mpesa
+ *
+ * Clients sometimes send the human label ("M-Pesa", "MPESA", "M Pesa",
+ * "Gift Card", "Gift card") or a key from the payment-methods config that
+ * happens to have different casing. Anything we don't recognise falls
+ * through as-is so the schema validator still surfaces the bad value.
+ */
+const PAYMENT_METHOD_ALIASES = {
+  cash: "cash",
+  card: "card",
+  credit: "credit",
+  check: "check",
+  cheque: "check",
+  mobile: "mobile",
+  "m-pesa": "mpesa",
+  "m pesa": "mpesa",
+  mpesa: "mpesa",
+  m_pesa: "mpesa",
+  "gift card": "credit",       // existing enum has no gift_card; credit is the closest
+  gift_card: "credit",
+  "gift-card": "credit",
+  giftcard: "credit",
+};
+
+const normalizePaymentMethodKey = (raw) => {
+  if (!raw || typeof raw !== "string") return raw;
+  const key = raw.trim().toLowerCase();
+  return PAYMENT_METHOD_ALIASES[key] || key;
+};
+
 const toObjectIdIfValid = (value) => {
   if (!value) return value;
   if (typeof value === "string" && mongoose.Types.ObjectId.isValid(value)) {
     return new mongoose.Types.ObjectId(value);
   }
   return value;
+};
+
+const normalizePaymentTimestamp = (value, fallback = new Date()) => {
+  if (!value) return fallback;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? fallback : parsed;
 };
 
 const deriveSalePaymentStatus = (payments = [], totalAmount = 0) => {
@@ -50,8 +91,10 @@ const deriveSalePaymentStatus = (payments = [], totalAmount = 0) => {
 
   if (total <= 0 || completedTotal >= total - 0.01) return "completed";
   if (completedTotal > 0) return "partial";
-  if (payments.some((p) => (p.status || "completed") === "pending")) return "pending";
-  if (payments.some((p) => (p.status || "completed") === "failed")) return "failed";
+  if (payments.some((p) => (p.status || "completed") === "pending"))
+    return "pending";
+  if (payments.some((p) => (p.status || "completed") === "failed"))
+    return "failed";
   return "pending";
 };
 
@@ -78,7 +121,9 @@ const summarizePaymentAmounts = (payments = []) => {
   return {
     grossAmount,
     exchangeCreditAmount,
-    netCollectedAmount: roundMoney(Math.max(0, grossAmount - exchangeCreditAmount)),
+    netCollectedAmount: roundMoney(
+      Math.max(0, grossAmount - exchangeCreditAmount),
+    ),
   };
 };
 
@@ -113,6 +158,7 @@ const getEffectivePayments = ({
       status: payment.status || "completed",
       paidAt: normalizePaymentTimestamp(payment.paidAt, fallbackDate || new Date()),
       reference: payment.reference || undefined,
+      source: payment.source || null,
       cardLast4: payment.cardLast4 || undefined,
       cardBrand: payment.cardBrand || undefined,
     }))
@@ -124,11 +170,19 @@ const getEffectivePayments = ({
     );
 
   const correctionEntries = [];
-  const sortedCorrections = (Array.isArray(paymentCorrections) ? paymentCorrections : [])
+  const sortedCorrections = (
+    Array.isArray(paymentCorrections) ? paymentCorrections : []
+  )
     .slice()
     .sort((a, b) => {
-      const aTime = normalizePaymentTimestamp(a?.correctedAt, fallbackDate || new Date());
-      const bTime = normalizePaymentTimestamp(b?.correctedAt, fallbackDate || new Date());
+      const aTime = normalizePaymentTimestamp(
+        a?.correctedAt,
+        fallbackDate || new Date(),
+      );
+      const bTime = normalizePaymentTimestamp(
+        b?.correctedAt,
+        fallbackDate || new Date(),
+      );
       return aTime.getTime() - bTime.getTime();
     });
 
@@ -136,10 +190,16 @@ const getEffectivePayments = ({
     for (const fromAllocation of correction?.fromAllocations || []) {
       const paymentIndex = Number(fromAllocation?.paymentIndex);
       const amount = roundMoney(Number(fromAllocation?.amount) || 0);
-      if (!Number.isInteger(paymentIndex) || paymentIndex < 0 || amount <= 0) continue;
-      const targetEntry = baseEntries.find((entry) => entry.paymentIndex === paymentIndex);
+      if (!Number.isInteger(paymentIndex) || paymentIndex < 0 || amount <= 0)
+        continue;
+      const targetEntry = baseEntries.find(
+        (entry) => entry.paymentIndex === paymentIndex,
+      );
       if (!targetEntry) continue;
-      targetEntry.remaining = Math.max(0, roundMoney(targetEntry.remaining - amount));
+      targetEntry.remaining = Math.max(
+        0,
+        roundMoney(targetEntry.remaining - amount),
+      );
     }
     for (const toAllocation of correction?.toAllocations || []) {
       const method = toAllocation?.method;
@@ -149,8 +209,12 @@ const getEffectivePayments = ({
         method,
         amount,
         status: "completed",
-        paidAt: normalizePaymentTimestamp(correction?.correctedAt, fallbackDate || new Date()),
+        paidAt: normalizePaymentTimestamp(
+          correction?.correctedAt,
+          fallbackDate || new Date(),
+        ),
         reference: toAllocation?.reference || undefined,
+        source: null,
         cardLast4: toAllocation?.cardLast4 || undefined,
         cardBrand: toAllocation?.cardBrand || undefined,
       });
@@ -165,6 +229,7 @@ const getEffectivePayments = ({
       status: "completed",
       paidAt: entry.paidAt,
       reference: entry.reference,
+      source: entry.source,
       cardLast4: entry.cardLast4,
       cardBrand: entry.cardBrand,
     }));
@@ -183,22 +248,34 @@ const getEffectivePaymentsForSale = (sale = {}) =>
     fallbackDate: sale.createdAt,
   });
 
-const getCorrectionAvailabilityByIndex = ({ payments = [], paymentCorrections = [] }) => {
+const getCorrectionAvailabilityByIndex = ({
+  payments = [],
+  paymentCorrections = [],
+}) => {
   const availability = new Map();
-  for (const [index, payment] of (Array.isArray(payments) ? payments : []).entries()) {
+  for (const [index, payment] of (Array.isArray(payments)
+    ? payments
+    : []
+  ).entries()) {
     if ((payment?.status || "completed") !== "completed") continue;
     const amount = roundMoney(Number(payment?.amount) || 0);
     if (amount <= 0) continue;
     availability.set(index, amount);
   }
-  for (const correction of Array.isArray(paymentCorrections) ? paymentCorrections : []) {
+  for (const correction of Array.isArray(paymentCorrections)
+    ? paymentCorrections
+    : []) {
     for (const fromAllocation of correction?.fromAllocations || []) {
       const paymentIndex = Number(fromAllocation?.paymentIndex);
       const amount = roundMoney(Number(fromAllocation?.amount) || 0);
-      if (!Number.isInteger(paymentIndex) || paymentIndex < 0 || amount <= 0) continue;
+      if (!Number.isInteger(paymentIndex) || paymentIndex < 0 || amount <= 0)
+        continue;
       const current = availability.get(paymentIndex);
       if (typeof current !== "number") continue;
-      availability.set(paymentIndex, Math.max(0, roundMoney(current - amount)));
+      availability.set(
+        paymentIndex,
+        Math.max(0, roundMoney(current - amount)),
+      );
     }
   }
   return availability;
@@ -212,13 +289,12 @@ const isDateWithinRange = ({ value, startDate, endDate }) => {
   return true;
 };
 
-const normalizePaymentTimestamp = (value, fallback = new Date()) => {
-  if (!value) return fallback;
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? fallback : parsed;
-};
-
-const userHasLocationAccess = async ({ organizationId, userId, role, locationId }) => {
+const userHasLocationAccess = async ({
+  organizationId,
+  userId,
+  role,
+  locationId,
+}) => {
   if (["Owner", "Manager"].includes(role)) return true;
   const membership = await UserOrganization.findOne({
     userId,
@@ -227,8 +303,15 @@ const userHasLocationAccess = async ({ organizationId, userId, role, locationId 
   })
     .select("locations")
     .lean();
-  if (!membership || !membership.locations || membership.locations.length === 0) return true;
-  return membership.locations.some((loc) => String(loc) === String(locationId));
+  if (
+    !membership ||
+    !membership.locations ||
+    membership.locations.length === 0
+  )
+    return true;
+  return membership.locations.some(
+    (loc) => String(loc) === String(locationId),
+  );
 };
 
 const resolveEffectiveTaxConfig = async ({ organizationId, location }) => {
@@ -236,7 +319,8 @@ const resolveEffectiveTaxConfig = async ({ organizationId, location }) => {
   const org = await Organization.findById(organizationId)
     .select("settings.taxMode")
     .lean();
-  if (VALID_TAX_MODES.includes(org?.settings?.taxMode)) orgTaxMode = org.settings.taxMode;
+  if (VALID_TAX_MODES.includes(org?.settings?.taxMode))
+    orgTaxMode = org.settings.taxMode;
   const locationTaxMode = VALID_TAX_MODES.includes(location?.taxMode)
     ? location.taxMode
     : null;
@@ -263,20 +347,35 @@ const buildShopifySyncSummary = (sale = {}) => {
     orderStatus: sale.status || "pending",
     syncStatus,
     retryAttempts,
-    successCount: syncLog.filter((entry) => entry?.status === "success").length,
-    pendingCount: syncLog.filter((entry) => entry?.status === "pending").length,
-    retryingCount: syncLog.filter((entry) => entry?.status === "retrying").length,
-    failedCount: syncLog.filter((entry) => entry?.status === "failed").length,
+    successCount: syncLog.filter((entry) => entry?.status === "success")
+      .length,
+    pendingCount: syncLog.filter((entry) => entry?.status === "pending")
+      .length,
+    retryingCount: syncLog.filter((entry) => entry?.status === "retrying")
+      .length,
+    failedCount: syncLog.filter((entry) => entry?.status === "failed")
+      .length,
     hasDetailedLog,
     isTerminal: ["synced", "failed"].includes(syncStatus),
   };
 };
 
 /**
- * POST /sales
- * Create a new sale with items from FLEXI and/or Shopify
- * Supports service‑product bundling and commission overrides.
+ * Decrypt a value that may be either a secretBox-encrypted payload or a
+ * legacy plaintext string. Returns { value, wasPlaintext }. Never throws.
  */
+function decryptOrPlaintext(stored) {
+  if (!stored) return { value: "", wasPlaintext: false };
+  try {
+    return { value: secretBox.decrypt(stored), wasPlaintext: false };
+  } catch {
+    return { value: String(stored), wasPlaintext: true };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// createSale
+// ---------------------------------------------------------------------------
 const createSale = async (req, res) => {
   try {
     const { organizationId } = req.user;
@@ -338,7 +437,8 @@ const createSale = async (req, res) => {
     if (!location) {
       return res.status(404).json({
         success: false,
-        message: "Location not found or does not belong to this organization",
+        message:
+          "Location not found or does not belong to this organization",
       });
     }
 
@@ -366,7 +466,6 @@ const createSale = async (req, res) => {
     const enrichedItems = [];
     const serviceItems = [];
 
-    // First pass: enrich items and collect service data
     for (const item of items) {
       if (item.type === "flexi") {
         if (!item.variantId) {
@@ -402,8 +501,10 @@ const createSale = async (req, res) => {
           });
         }
 
-        // Stock gate (skip for untracked variants and continueSelling variants)
-        if (variant.trackInventory !== false && !variant.continueSellingWhenOutOfStock) {
+        if (
+          variant.trackInventory !== false &&
+          !variant.continueSellingWhenOutOfStock
+        ) {
           const inv = await Inventory.findOne({
             organizationId,
             variantId: variant._id,
@@ -420,7 +521,9 @@ const createSale = async (req, res) => {
               success: false,
               message: `Insufficient stock for "${product.name}"${
                 variant.selectedOptions?.length
-                  ? ` (${variant.selectedOptions.map((o) => o.value).join(" / ")})`
+                  ? ` (${variant.selectedOptions
+                      .map((o) => o.value)
+                      .join(" / ")})`
                   : ""
               }. Available: ${available}, requested: ${requested}.`,
             });
@@ -444,7 +547,10 @@ const createSale = async (req, res) => {
           productId: product._id,
           variantId: variant._id,
           variantTitle: Array.isArray(variant.selectedOptions)
-            ? variant.selectedOptions.map((o) => ({ name: o.name, value: o.value }))
+            ? variant.selectedOptions.map((o) => ({
+                name: o.name,
+                value: o.value,
+              }))
             : [],
           productName: product.name,
           sku: variant.sku || product.sku,
@@ -513,36 +619,49 @@ const createSale = async (req, res) => {
           serviceAssignedUser = saleAssignedUser;
         }
 
-        // Build bundle components snapshot (if any)
-        const serviceBundleComponents = Array.isArray(product.serviceBundleComponents)
+        const serviceBundleComponents = Array.isArray(
+          product.serviceBundleComponents,
+        )
           ? product.serviceBundleComponents.map((component) => ({
               serviceProductId: component.serviceProductId,
               productName: component.nameSnapshot || "",
               sku: component.skuSnapshot || "",
               quantity: Number(component.quantity) || 1,
               unitPrice: Number(component.priceSnapshot) || 0,
-              lineTotal: roundMoney((Number(component.quantity) || 1) * (Number(component.priceSnapshot) || 0)),
+              lineTotal: roundMoney(
+                (Number(component.quantity) || 1) *
+                  (Number(component.priceSnapshot) || 0),
+              ),
             }))
           : [];
 
-        // Determine effective commission
         let effectiveCommissionType = item.commissionType || null;
-        let effectiveCommissionValue = item.commissionValue !== undefined ? Number(item.commissionValue) : null;
+        let effectiveCommissionValue =
+          item.commissionValue !== undefined
+            ? Number(item.commissionValue)
+            : null;
         let isOverride = false;
 
-        if (effectiveCommissionType === null || effectiveCommissionValue === null) {
+        if (
+          effectiveCommissionType === null ||
+          effectiveCommissionValue === null
+        ) {
           const defaultType = product.commissionType || "percentage";
           const defaultValue = Number(product.commissionValue) || 0;
           effectiveCommissionType = defaultType;
           effectiveCommissionValue = defaultValue;
 
-          if (serviceAssignedUser && serviceAssignedUser.commissionOverrides) {
+          if (
+            serviceAssignedUser &&
+            serviceAssignedUser.commissionOverrides
+          ) {
             const override = serviceAssignedUser.commissionOverrides.find(
               (ov) => ov.serviceId.toString() === product._id.toString(),
             );
             if (override) {
               effectiveCommissionType = override.commissionType;
-              effectiveCommissionValue = Number(override.commissionValue) || 0;
+              effectiveCommissionValue =
+                Number(override.commissionValue) || 0;
               isOverride = true;
             }
           }
@@ -550,15 +669,21 @@ const createSale = async (req, res) => {
           isOverride = true;
         }
 
-        // Compute commission amount – use frontend's value if provided, otherwise calculate
         let commissionAmount = 0;
-        if (item.commissionAmount !== undefined && item.commissionAmount !== null) {
+        if (
+          item.commissionAmount !== undefined &&
+          item.commissionAmount !== null
+        ) {
           commissionAmount = roundMoney(Number(item.commissionAmount));
         } else {
           if (effectiveCommissionType === "percentage") {
-            commissionAmount = (laborCost * effectiveCommissionValue) / 100;
+            commissionAmount =
+              (laborCost * effectiveCommissionValue) / 100;
           } else {
-            commissionAmount = Math.min(effectiveCommissionValue, laborCost);
+            commissionAmount = Math.min(
+              effectiveCommissionValue,
+              laborCost,
+            );
           }
           commissionAmount = roundMoney(commissionAmount);
         }
@@ -576,13 +701,17 @@ const createSale = async (req, res) => {
           discount,
           taxAmount: lineTax,
           serviceBundle: {
-            isBundle: product.serviceKind === "bundle" || serviceBundleComponents.length > 0,
+            isBundle:
+              product.serviceKind === "bundle" ||
+              serviceBundleComponents.length > 0,
             bundleName: product.name,
             components: serviceBundleComponents,
           },
           parentItemIndex: null,
           originalPrice: 0,
-          assignedUser: serviceAssignedUser ? serviceAssignedUser._id : null,
+          assignedUser: serviceAssignedUser
+            ? serviceAssignedUser._id
+            : null,
           commissionType: effectiveCommissionType,
           commissionValue: effectiveCommissionValue,
           commissionAmount,
@@ -668,12 +797,13 @@ const createSale = async (req, res) => {
       }
     }
 
-    // Validate assigned users
     const servicesWithoutUser = enrichedItems.filter(
       (item) => item.type === "service" && !item.assignedUser,
     );
     if (servicesWithoutUser.length > 0) {
-      const names = servicesWithoutUser.map((item) => item.productName).join(", ");
+      const names = servicesWithoutUser
+        .map((item) => item.productName)
+        .join(", ");
       return res.status(400).json({
         success: false,
         message: `The following services require an assigned user: ${names}`,
@@ -689,14 +819,14 @@ const createSale = async (req, res) => {
       totalAmount += totalTax;
     }
 
-    // --- Delivery fee processing (unchanged) ---
     let deliveryFee = null;
     let deliveryFeeAmount = 0;
     if (deliveryInfo && deliveryInfo.requiresDelivery) {
       const missingFields = [];
       if (!deliveryInfo.recipientName) missingFields.push("recipientName");
       if (!deliveryInfo.recipientPhone) missingFields.push("recipientPhone");
-      if (!deliveryInfo.deliveryAddress) missingFields.push("deliveryAddress");
+      if (!deliveryInfo.deliveryAddress)
+        missingFields.push("deliveryAddress");
       if (missingFields.length > 0) {
         return res.status(400).json({
           success: false,
@@ -704,15 +834,21 @@ const createSale = async (req, res) => {
         });
       }
       const addressMissingFields = [];
-      if (!deliveryInfo.deliveryAddress.street) addressMissingFields.push("street");
-      if (!deliveryInfo.deliveryAddress.city) addressMissingFields.push("city");
+      if (!deliveryInfo.deliveryAddress.street)
+        addressMissingFields.push("street");
+      if (!deliveryInfo.deliveryAddress.city)
+        addressMissingFields.push("city");
       if (addressMissingFields.length > 0) {
         return res.status(400).json({
           success: false,
-          message: `Delivery address must include: ${addressMissingFields.join(", ")}`,
+          message: `Delivery address must include: ${addressMissingFields.join(
+            ", ",
+          )}`,
         });
       }
-      const usingCategory = !!(deliveryInfo.deliveryCategory && deliveryInfo.deliveryOption);
+      const usingCategory = !!(
+        deliveryInfo.deliveryCategory && deliveryInfo.deliveryOption
+      );
       const usingLegacyFeeType = !!deliveryInfo.feeType;
       if (!usingCategory && !usingLegacyFeeType) {
         return res.status(400).json({
@@ -730,7 +866,7 @@ const createSale = async (req, res) => {
         deliveryCategory = deliveryInfo.deliveryCategory;
         deliveryOption = deliveryInfo.deliveryOption;
         const category = location.deliveryCategories?.find(
-          (cat) => cat.categoryName === deliveryCategory
+          (cat) => cat.categoryName === deliveryCategory,
         );
         if (!category) {
           return res.status(404).json({
@@ -745,7 +881,7 @@ const createSale = async (req, res) => {
           });
         }
         const option = category.childOptions?.find(
-          (opt) => opt.optionName === deliveryOption
+          (opt) => opt.optionName === deliveryOption,
         );
         if (!option) {
           return res.status(404).json({
@@ -762,12 +898,16 @@ const createSale = async (req, res) => {
         amount = option.price;
         categoryStatus = category.statusWorkflow?.[0]?.status || "pending";
       } else {
-        feeType = deliveryInfo.feeType || location.deliveryFeeSettings?.defaultFeeType || "standard";
+        feeType =
+          deliveryInfo.feeType ||
+          location.deliveryFeeSettings?.defaultFeeType ||
+          "standard";
         if (feeType === "custom") {
           if (!deliveryInfo.customAmount || deliveryInfo.customAmount < 0) {
             return res.status(400).json({
               success: false,
-              message: "Custom fee amount is required for custom fee type",
+              message:
+                "Custom fee amount is required for custom fee type",
             });
           }
           amount = deliveryInfo.customAmount;
@@ -792,16 +932,17 @@ const createSale = async (req, res) => {
         isTaxable: false,
         taxAmount: deliveryTax,
         totalAmount: deliveryFeeAmount,
-        deliveryAddress: typeof deliveryInfo.deliveryAddress === 'string' 
-          ? {
-              street: deliveryInfo.deliveryAddress,
-              city: deliveryInfo.city || "N/A",
-              state: deliveryInfo.state,
-              postalCode: deliveryInfo.postalCode,
-              country: deliveryInfo.country || "Kenya",
-              landmark: deliveryInfo.landmark,
-            }
-          : deliveryInfo.deliveryAddress,
+        deliveryAddress:
+          typeof deliveryInfo.deliveryAddress === "string"
+            ? {
+                street: deliveryInfo.deliveryAddress,
+                city: deliveryInfo.city || "N/A",
+                state: deliveryInfo.state,
+                postalCode: deliveryInfo.postalCode,
+                country: deliveryInfo.country || "Kenya",
+                landmark: deliveryInfo.landmark,
+              }
+            : deliveryInfo.deliveryAddress,
         recipientName: deliveryInfo.recipientName,
         recipientPhone: deliveryInfo.recipientPhone,
         recipientEmail: deliveryInfo.recipientEmail,
@@ -811,10 +952,12 @@ const createSale = async (req, res) => {
       };
     }
 
-    // --- Payments (unchanged) ---
     let normalizedPayments = [];
     if (payments && Array.isArray(payments) && payments.length > 0) {
-      const sum = payments.reduce((acc, p) => acc + (Number(p.amount) || 0), 0);
+      const sum = payments.reduce(
+        (acc, p) => acc + (Number(p.amount) || 0),
+        0,
+      );
       if (sum <= 0) {
         return res.status(400).json({
           success: false,
@@ -824,13 +967,16 @@ const createSale = async (req, res) => {
       if (sum - totalAmount > 0.01) {
         return res.status(400).json({
           success: false,
-          message: `Payments total (${sum.toFixed(2)}) cannot exceed sale total (${totalAmount.toFixed(2)})`,
+          message: `Payments total (${sum.toFixed(
+            2,
+          )}) cannot exceed sale total (${totalAmount.toFixed(2)})`,
         });
       }
       normalizedPayments = payments.map((p) => ({
-        method: p.method,
+        method: normalizePaymentMethodKey(p.method),
         amount: Number(p.amount) || 0,
         reference: p.reference || undefined,
+        source: p.source || undefined,
         status: p.status || "completed",
         paidAt: normalizePaymentTimestamp(p.paidAt),
         cardLast4: p.cardLast4 || undefined,
@@ -839,7 +985,7 @@ const createSale = async (req, res) => {
     } else if (paymentMethod) {
       normalizedPayments = [
         {
-          method: paymentMethod,
+          method: normalizePaymentMethodKey(paymentMethod),
           amount: totalAmount,
           status: paymentStatus || "completed",
           paidAt: new Date(),
@@ -847,24 +993,37 @@ const createSale = async (req, res) => {
       ];
     }
 
-    // Override for STK-pending POS sales
     if (useStk && normalizedPayments.length === 0) {
       normalizedPayments = [];
     }
 
-    const completedPaymentsTotal = getCompletedPaymentsTotal(normalizedPayments);
-    const initialBalanceDue = Math.max(0, roundMoney(totalAmount - completedPaymentsTotal));
-    const overallPaymentStatus = deriveSalePaymentStatus(normalizedPayments, totalAmount);
+    const completedPaymentsTotal = getCompletedPaymentsTotal(
+      normalizedPayments,
+    );
+    const initialBalanceDue = Math.max(
+      0,
+      roundMoney(totalAmount - completedPaymentsTotal),
+    );
+    const overallPaymentStatus = deriveSalePaymentStatus(
+      normalizedPayments,
+      totalAmount,
+    );
 
     const normalizedTags = Array.isArray(tags) ? [...tags] : [];
-    if (initialBalanceDue > 0.01) {
-      if (!normalizedTags.includes("reservation")) normalizedTags.push("reservation");
-      if (!normalizedTags.includes("partial-payment")) normalizedTags.push("partial-payment");
+    // Tag as a reservation only when the customer has actually partially
+    // paid. A pending STK sale has a balance due but no payment yet — it's
+    // not a reservation.
+    if (overallPaymentStatus === "partial" && initialBalanceDue > 0.01) {
+      if (!normalizedTags.includes("reservation"))
+        normalizedTags.push("reservation");
+      if (!normalizedTags.includes("partial-payment"))
+        normalizedTags.push("partial-payment");
     }
 
-    // Shift session check
     const ShiftSession = require("../models/ShiftSession");
-    const { findPreviousDayOpenShiftSession } = require("../utils/shiftSessionCalculations");
+    const {
+      findPreviousDayOpenShiftSession,
+    } = require("../utils/shiftSessionCalculations");
     const previousDayOpenShift = await findPreviousDayOpenShiftSession({
       ShiftSession,
       organizationId,
@@ -875,7 +1034,8 @@ const createSale = async (req, res) => {
       return res.status(403).json({
         success: false,
         code: "PREVIOUS_SHIFT_OPEN",
-        message: "Close the previous day's shift before completing a new sale",
+        message:
+          "Close the previous day's shift before completing a new sale",
         data: previousDayOpenShift,
       });
     }
@@ -894,6 +1054,12 @@ const createSale = async (req, res) => {
       });
     }
 
+    // Pending STK state — computed once, used both for the Sale doc fields
+    // and for the inventory deferral decision below.
+    const isPendingStk =
+      req.body?.useStk === true &&
+      normalizedPayments.length === 0 &&
+      overallPaymentStatus === "pending";
     const receiptNumber = `REC-${organizationId}-${Date.now()}`;
     const transactionId = `TXN-${organizationId}-${Date.now()}`;
 
@@ -918,21 +1084,27 @@ const createSale = async (req, res) => {
         totalAmount,
         deliveryFeeAmount: deliveryFeeAmount || 0,
         requiresDelivery: deliveryInfo?.requiresDelivery || false,
-        deliveryStatus: deliveryInfo?.requiresDelivery ? "pending" : "not_required",
+        deliveryStatus: deliveryInfo?.requiresDelivery
+          ? "pending"
+          : "not_required",
         deliveryCategory: deliveryFee?.deliveryCategory || undefined,
         deliveryOption: deliveryFee?.deliveryOption || undefined,
         categoryStatus: deliveryFee?.categoryStatus || undefined,
-        deliveryStatusSyncedAt: deliveryInfo?.requiresDelivery ? new Date() : undefined,
+        deliveryStatusSyncedAt: deliveryInfo?.requiresDelivery
+          ? new Date()
+          : undefined,
         paymentMethod:
-          normalizedPayments.length === 1 ? normalizedPayments[0].method : undefined,
+          normalizedPayments.length === 1
+            ? normalizedPayments[0].method
+            : undefined,
         payments: normalizedPayments,
         paymentStatus: overallPaymentStatus,
         cashierId: req.user.userId,
         assignedUser: assignedUser || undefined,
         shiftSessionId: openShift._id,
         validationStatus: "pending",
-        status: "completed",
-        completedAt: new Date(),
+        status: isPendingStk ? "pending" : "completed",
+        completedAt: isPendingStk ? undefined : new Date(),
         inventoryStatus: "pending",
         notes,
         tags: normalizedTags,
@@ -940,7 +1112,6 @@ const createSale = async (req, res) => {
 
       await sale.save({ session });
 
-      // Create receivable if needed
       let createdReceivable = null;
       if (initialBalanceDue > 0.01) {
         createdReceivable = new Receivable({
@@ -967,10 +1138,15 @@ const createSale = async (req, res) => {
             completedPaymentsTotal > 0
               ? normalizePaymentTimestamp(
                   normalizedPayments
-                    .filter((p) => (p.status || "completed") === "completed")
+                    .filter(
+                      (p) =>
+                        (p.status || "completed") === "completed",
+                    )
                     .sort(
                       (a, b) =>
-                        normalizePaymentTimestamp(b.paidAt).getTime() -
+                        normalizePaymentTimestamp(
+                          b.paidAt,
+                        ).getTime() -
                         normalizePaymentTimestamp(a.paidAt).getTime(),
                     )[0]?.paidAt,
                 )
@@ -981,7 +1157,6 @@ const createSale = async (req, res) => {
         await createdReceivable.save({ session });
       }
 
-      // Create delivery fee if required
       let createdDeliveryFee = null;
       if (deliveryFee) {
         createdDeliveryFee = new DeliveryFee({
@@ -996,16 +1171,6 @@ const createSale = async (req, res) => {
         sale.deliveryFeeId = createdDeliveryFee._id;
         await sale.save({ session });
       }
-
-      // Defer inventory for POS sales awaiting STK payment. The callback
-      // (or the mark-paid endpoint) will apply it once the customer pays.
-      // Everything else deducts immediately, as before.
-      const isPendingStk =
-        sale.salesChannel === "pos" &&
-        sale.paymentStatus === "pending" &&
-        Array.isArray(sale.payments) &&
-        sale.payments.length === 0 &&
-        req.body?.useStk === true;
 
       if (!isPendingStk) {
         await processInventoryUpdates(sale, organizationId, session);
@@ -1056,10 +1221,9 @@ const createSale = async (req, res) => {
   }
 };
 
-/**
- * GET /sales/receivables
- * List receivables (open, partial, paid)
- */
+// ---------------------------------------------------------------------------
+// listReceivables
+// ---------------------------------------------------------------------------
 const listReceivables = async (req, res) => {
   try {
     const { organizationId, userId, role } = req.user;
@@ -1102,7 +1266,10 @@ const listReceivables = async (req, res) => {
     const skip = (parseInt(page) - 1) * parseInt(limit);
     const [receivables, total] = await Promise.all([
       Receivable.find(query)
-        .populate("saleId", "receiptNumber transactionId totalAmount paymentStatus status")
+        .populate(
+          "saleId",
+          "receiptNumber transactionId totalAmount paymentStatus status",
+        )
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(parseInt(limit))
@@ -1132,17 +1299,18 @@ const listReceivables = async (req, res) => {
   }
 };
 
-/**
- * GET /sales/:id/receivable
- * Get receivable details for a sale
- */
+// ---------------------------------------------------------------------------
+// getSaleReceivable
+// ---------------------------------------------------------------------------
 const getSaleReceivable = async (req, res) => {
   try {
     const { organizationId, userId, role } = req.user;
     const { id } = req.params;
 
     const sale = await Sale.findOne({ _id: id, organizationId })
-      .select("_id locationId totalAmount paymentStatus paymentMethod payments paymentCorrections createdAt")
+      .select(
+        "_id locationId totalAmount paymentStatus paymentMethod payments paymentCorrections createdAt",
+      )
       .lean();
 
     if (!sale) {
@@ -1167,11 +1335,17 @@ const getSaleReceivable = async (req, res) => {
       });
     }
 
-    const receivable = await Receivable.findOne({ organizationId, saleId: id }).lean();
+    const receivable = await Receivable.findOne({
+      organizationId,
+      saleId: id,
+    }).lean();
     if (!receivable) {
       const effectivePayments = getEffectivePaymentsForSale(sale);
       const amountPaid = getCompletedPaymentsTotal(effectivePayments);
-      const balanceDue = Math.max(0, roundMoney((sale.totalAmount || 0) - amountPaid));
+      const balanceDue = Math.max(
+        0,
+        roundMoney((sale.totalAmount || 0) - amountPaid),
+      );
       return res.json({
         success: true,
         data: {
@@ -1210,23 +1384,9 @@ const getSaleReceivable = async (req, res) => {
   }
 };
 
-/**
- * Decrypt a value that may be either a secretBox-encrypted payload or a
- * legacy plaintext string. Returns { value, wasPlaintext }. Never throws.
- */
-function decryptOrPlaintext(stored) {
-  if (!stored) return { value: "", wasPlaintext: false };
-  try {
-    return { value: secretBox.decrypt(stored), wasPlaintext: false };
-  } catch {
-    return { value: String(stored), wasPlaintext: true };
-  }
-}
-
-/**
- * POST /sales/:id/payments
- * Add additional payment to settle outstanding receivable
- */
+// ---------------------------------------------------------------------------
+// recordSalePayment
+// ---------------------------------------------------------------------------
 const recordSalePayment = async (req, res) => {
   const session = await Sale.startSession();
 
@@ -1250,7 +1410,9 @@ const recordSalePayment = async (req, res) => {
       });
     }
 
-    const sale = await Sale.findOne({ _id: id, organizationId }).session(session);
+    const sale = await Sale.findOne({ _id: id, organizationId }).session(
+      session,
+    );
     if (!sale) {
       return res.status(404).json({
         success: false,
@@ -1282,13 +1444,17 @@ const recordSalePayment = async (req, res) => {
 
     session.startTransaction();
 
-    let receivable = await Receivable.findOne({ organizationId, saleId: sale._id }).session(
-      session,
-    );
+    let receivable = await Receivable.findOne({
+      organizationId,
+      saleId: sale._id,
+    }).session(session);
 
     if (!receivable) {
       const paid = getCompletedPaymentsTotal(sale.payments || []);
-      const outstanding = Math.max(0, roundMoney((sale.totalAmount || 0) - paid));
+      const outstanding = Math.max(
+        0,
+        roundMoney((sale.totalAmount || 0) - paid),
+      );
 
       if (outstanding <= 0.01) {
         await session.abortTransaction();
@@ -1316,14 +1482,20 @@ const recordSalePayment = async (req, res) => {
           cardLast4: p.cardLast4 || undefined,
           cardBrand: p.cardBrand || undefined,
           collectedBy: sale.cashierId,
-          collectedAt: normalizePaymentTimestamp(p.paidAt, sale.createdAt || new Date()),
+          collectedAt: normalizePaymentTimestamp(
+            p.paidAt,
+            sale.createdAt || new Date(),
+          ),
         })),
         createdBy: sale.cashierId,
         updatedBy: userId,
       });
     }
 
-    if (["paid", "cancelled"].includes(receivable.status) || receivable.balanceDue <= 0.01) {
+    if (
+      ["paid", "cancelled"].includes(receivable.status) ||
+      receivable.balanceDue <= 0.01
+    ) {
       await session.abortTransaction();
       return res.status(400).json({
         success: false,
@@ -1336,14 +1508,18 @@ const recordSalePayment = async (req, res) => {
       await session.abortTransaction();
       return res.status(400).json({
         success: false,
-        message: `Payment amount (${paymentAmount.toFixed(2)}) cannot exceed balance due (${receivable.balanceDue.toFixed(2)})`,
+        message: `Payment amount (${paymentAmount.toFixed(
+          2,
+        )}) cannot exceed balance due (${receivable.balanceDue.toFixed(2)})`,
       });
     }
 
     const paymentTimestamp = new Date();
 
+    
     const paymentEntry = {
-      method,
+      method: normalizePaymentMethodKey(method),
+      amount: paymentAmount,
       amount: paymentAmount,
       reference: reference || undefined,
       status,
@@ -1355,7 +1531,9 @@ const recordSalePayment = async (req, res) => {
 
     receivable.payments.push(paymentEntry);
     if (status === "completed") {
-      receivable.totalPaid = roundMoney((receivable.totalPaid || 0) + paymentAmount);
+      receivable.totalPaid = roundMoney(
+        (receivable.totalPaid || 0) + paymentAmount,
+      );
       receivable.balanceDue = Math.max(
         0,
         roundMoney((receivable.totalDue || 0) - (receivable.totalPaid || 0)),
@@ -1380,7 +1558,7 @@ const recordSalePayment = async (req, res) => {
     await receivable.save({ session });
 
     sale.payments.push({
-      method,
+      method: normalizePaymentMethodKey(method),
       amount: paymentAmount,
       reference: reference || undefined,
       status,
@@ -1389,7 +1567,10 @@ const recordSalePayment = async (req, res) => {
       cardBrand: cardBrand || undefined,
     });
 
-    sale.paymentStatus = deriveSalePaymentStatus(sale.payments, sale.totalAmount);
+    sale.paymentStatus = deriveSalePaymentStatus(
+      sale.payments,
+      sale.totalAmount,
+    );
     sale.lastModified = new Date();
     sale.modifiedBy = userId;
     await sale.save({ session });
@@ -1421,22 +1602,16 @@ const recordSalePayment = async (req, res) => {
   }
 };
 
-/**
- * PATCH /sales/:id/payments/reallocate
- * Reallocate completed payment allocations with immutable correction trail
- */
+// ---------------------------------------------------------------------------
+// reallocateSalePayment
+// ---------------------------------------------------------------------------
 const reallocateSalePayment = async (req, res) => {
   const session = await Sale.startSession();
 
   try {
     const { organizationId, userId, role } = req.user;
     const { id } = req.params;
-    const {
-      fromAllocations,
-      toAllocations,
-      reason,
-      notes,
-    } = req.body || {};
+    const { fromAllocations, toAllocations, reason, notes } = req.body || {};
 
     if (!Array.isArray(fromAllocations) || fromAllocations.length === 0) {
       return res.status(400).json({
@@ -1459,7 +1634,9 @@ const reallocateSalePayment = async (req, res) => {
       });
     }
 
-    const sale = await Sale.findOne({ _id: id, organizationId }).session(session);
+    const sale = await Sale.findOne({ _id: id, organizationId }).session(
+      session,
+    );
     if (!sale) {
       return res.status(404).json({
         success: false,
@@ -1511,12 +1688,15 @@ const reallocateSalePayment = async (req, res) => {
     ) {
       return res.status(400).json({
         success: false,
-        message: "Each from allocation must include valid paymentIndex and amount > 0",
+        message:
+          "Each from allocation must include valid paymentIndex and amount > 0",
       });
     }
 
     const normalizedTo = toAllocations.map((allocation) => ({
-      method: String(allocation?.method || "").trim().toLowerCase(),
+      method: normalizePaymentMethodKey(
+        String(allocation?.method || "").trim(),
+      ),
       amount: roundMoney(Number(allocation?.amount) || 0),
       reference: allocation?.reference || undefined,
       cardLast4: allocation?.cardLast4 || undefined,
@@ -1532,14 +1712,17 @@ const reallocateSalePayment = async (req, res) => {
     ) {
       return res.status(400).json({
         success: false,
-        message: "Each to allocation must include valid payment method and amount > 0",
+        message:
+          "Each to allocation must include valid payment method and amount > 0",
       });
     }
 
     const groupedFromByIndex = normalizedFrom.reduce((acc, allocation) => {
       acc.set(
         allocation.paymentIndex,
-        roundMoney((acc.get(allocation.paymentIndex) || 0) + allocation.amount),
+        roundMoney(
+          (acc.get(allocation.paymentIndex) || 0) + allocation.amount,
+        ),
       );
       return acc;
     }, new Map());
@@ -1566,7 +1749,9 @@ const reallocateSalePayment = async (req, res) => {
         });
       }
 
-      const available = roundMoney(availableSaleByIndex.get(paymentIndex) || 0);
+      const available = roundMoney(
+        availableSaleByIndex.get(paymentIndex) || 0,
+      );
       if (amount - available > 0.01) {
         return res.status(400).json({
           success: false,
@@ -1582,7 +1767,10 @@ const reallocateSalePayment = async (req, res) => {
     }
 
     const fromTotal = roundMoney(
-      resolvedFromAllocations.reduce((sum, allocation) => sum + allocation.amount, 0),
+      resolvedFromAllocations.reduce(
+        (sum, allocation) => sum + allocation.amount,
+        0,
+      ),
     );
     const toTotal = roundMoney(
       normalizedTo.reduce((sum, allocation) => sum + allocation.amount, 0),
@@ -1591,19 +1779,24 @@ const reallocateSalePayment = async (req, res) => {
     if (Math.abs(fromTotal - toTotal) > 0.01) {
       return res.status(400).json({
         success: false,
-        message: "Total amount in fromAllocations must match total amount in toAllocations",
+        message:
+          "Total amount in fromAllocations must match total amount in toAllocations",
       });
     }
 
     session.startTransaction();
 
-    let receivable = await Receivable.findOne({ organizationId, saleId: sale._id }).session(
-      session,
-    );
+    let receivable = await Receivable.findOne({
+      organizationId,
+      saleId: sale._id,
+    }).session(session);
 
     if (!receivable) {
       const paid = getCompletedPaymentsTotal(sale.payments || []);
-      const outstanding = Math.max(0, roundMoney((sale.totalAmount || 0) - paid));
+      const outstanding = Math.max(
+        0,
+        roundMoney((sale.totalAmount || 0) - paid),
+      );
 
       receivable = new Receivable({
         organizationId,
@@ -1623,7 +1816,10 @@ const reallocateSalePayment = async (req, res) => {
           cardLast4: p.cardLast4 || undefined,
           cardBrand: p.cardBrand || undefined,
           collectedBy: sale.cashierId,
-          collectedAt: normalizePaymentTimestamp(p.paidAt, sale.createdAt || new Date()),
+          collectedAt: normalizePaymentTimestamp(
+            p.paidAt,
+            sale.createdAt || new Date(),
+          ),
         })),
         createdBy: sale.cashierId,
         updatedBy: userId,
@@ -1636,7 +1832,8 @@ const reallocateSalePayment = async (req, res) => {
     });
 
     for (const fromAllocation of resolvedFromAllocations) {
-      const receivablePayment = receivable.payments[fromAllocation.paymentIndex];
+      const receivablePayment =
+        receivable.payments[fromAllocation.paymentIndex];
       if (!receivablePayment) {
         await session.abortTransaction();
         return res.status(400).json({
@@ -1669,7 +1866,10 @@ const reallocateSalePayment = async (req, res) => {
       correctedAt,
     };
 
-    sale.paymentCorrections = [...(sale.paymentCorrections || []), correctionPayload];
+    sale.paymentCorrections = [
+      ...(sale.paymentCorrections || []),
+      correctionPayload,
+    ];
     sale.paymentStatus = deriveSalePaymentStatus(
       getEffectivePaymentsForSale(sale),
       sale.totalAmount,
@@ -1713,21 +1913,9 @@ const reallocateSalePayment = async (req, res) => {
   }
 };
 
-/**
- * Helper: Process inventory updates for FLEXI and Shopify items
- * Executes within a MongoDB transaction session
- */
-/**
- * Helper: Process inventory updates for FLEXI and Shopify items
- * Executes within a MongoDB transaction session
- */
-
-
-
-/**
- * GET /sales/:id
- * Get a specific sale
- */
+// ---------------------------------------------------------------------------
+// getSale
+// ---------------------------------------------------------------------------
 const getSale = async (req, res) => {
   try {
     const { organizationId } = req.user;
@@ -1763,10 +1951,9 @@ const getSale = async (req, res) => {
   }
 };
 
-/**
- * GET /sales
- * List sales with filters
- */
+// ---------------------------------------------------------------------------
+// listSales
+// ---------------------------------------------------------------------------
 const listSales = async (req, res) => {
   try {
     const { organizationId, userId, role } = req.user;
@@ -1782,7 +1969,7 @@ const listSales = async (req, res) => {
       search,
       limit = 50,
       page = 1,
-      salesChannel
+      salesChannel,
     } = req.query;
 
     const filter = { organizationId };
@@ -1909,7 +2096,9 @@ const listSales = async (req, res) => {
           );
 
           const paymentDates = matchedPayments
-            .map((payment) => normalizePaymentTimestamp(payment.paidAt, sale.createdAt))
+            .map((payment) =>
+              normalizePaymentTimestamp(payment.paidAt, sale.createdAt),
+            )
             .filter(Boolean);
 
           if (paymentDates.length > 0) {
@@ -1919,7 +2108,9 @@ const listSales = async (req, res) => {
           }
 
           paymentMethodsInRange = [
-            ...new Set(matchedPayments.map((payment) => payment.method).filter(Boolean)),
+            ...new Set(
+              matchedPayments.map((payment) => payment.method).filter(Boolean),
+            ),
           ];
 
           return {
@@ -2002,10 +2193,9 @@ const listSales = async (req, res) => {
   }
 };
 
-/**
- * POST /sales/:id/void
- * Void a sale
- */
+// ---------------------------------------------------------------------------
+// voidSale
+// ---------------------------------------------------------------------------
 const voidSale = async (req, res) => {
   try {
     const { organizationId } = req.user;
@@ -2063,10 +2253,9 @@ const voidSale = async (req, res) => {
   }
 };
 
-/**
- * POST /sales/:id/refund
- * Process refund for a sale
- */
+// ---------------------------------------------------------------------------
+// refundSale
+// ---------------------------------------------------------------------------
 const refundSale = async (req, res) => {
   try {
     const { organizationId } = req.user;
@@ -2198,11 +2387,9 @@ const refundSale = async (req, res) => {
   }
 };
 
-/**
- * PATCH /sales/:id/reservation
- * Edit a reservation sale with transactional retry logic
- * Preserves existing payments; recalculates balance due and derived fields
- */
+// ---------------------------------------------------------------------------
+// editReservationSale
+// ---------------------------------------------------------------------------
 const MAX_EDIT_RETRIES = 3;
 const editReservationSale = async (req, res) => {
   const { organizationId, userId } = req.user;
@@ -2224,7 +2411,9 @@ const editReservationSale = async (req, res) => {
     try {
       await session.startTransaction();
 
-      const sale = await Sale.findOne({ _id: id, organizationId }).session(session);
+      const sale = await Sale.findOne({ _id: id, organizationId }).session(
+        session,
+      );
 
       if (!sale) {
         await session.abortTransaction();
@@ -2234,11 +2423,19 @@ const editReservationSale = async (req, res) => {
         });
       }
 
-      if (sale.status !== "completed" && sale.status !== "partial") {
+      // Reservation-only guard: completed sale with balance due or
+      // explicitly tagged "reservation".
+      const isReservation =
+        sale.status === "completed" &&
+        (sale.paymentStatus === "partial" ||
+          (Array.isArray(sale.tags) && sale.tags.includes("reservation")));
+
+      if (!isReservation) {
         await session.abortTransaction();
         return res.status(400).json({
           success: false,
-          message: `Only completed or partially paid sales can be edited. Current status: ${sale.status}`,
+          message:
+            "Only reservations can be edited. Corrections to a completed sale should go through the refund flow.",
         });
       }
 
@@ -2291,17 +2488,29 @@ const editReservationSale = async (req, res) => {
           }
 
           if (sale.items[itemIndex]) {
-            const qty = Number(replacementItem.quantity !== undefined ? replacementItem.quantity : sale.items[itemIndex].quantity);
+            const qty = Number(
+              replacementItem.quantity !== undefined
+                ? replacementItem.quantity
+                : sale.items[itemIndex].quantity,
+            );
             if (!Number.isFinite(qty) || qty <= 0) {
               throw new Error("Item quantity must be greater than zero");
             }
 
             sale.items[itemIndex].quantity = qty;
             sale.items[itemIndex].unitPrice = roundMoney(
-              Number(replacementItem.unitPrice !== undefined ? replacementItem.unitPrice : sale.items[itemIndex].unitPrice || 0),
+              Number(
+                replacementItem.unitPrice !== undefined
+                  ? replacementItem.unitPrice
+                  : sale.items[itemIndex].unitPrice || 0,
+              ),
             );
             sale.items[itemIndex].discount = roundMoney(
-              Number(replacementItem.discount !== undefined ? replacementItem.discount : sale.items[itemIndex].discount || 0),
+              Number(
+                replacementItem.discount !== undefined
+                  ? replacementItem.discount
+                  : sale.items[itemIndex].discount || 0,
+              ),
             );
             itemsChanged = true;
           }
@@ -2336,10 +2545,14 @@ const editReservationSale = async (req, res) => {
         if (taxMode === "exclusive") {
           taxAmount = roundMoney((subtotal * (taxRate || 0)) / 100);
         } else {
-          taxAmount = roundMoney(subtotal - subtotal / (1 + (taxRate || 0) / 100));
+          taxAmount = roundMoney(
+            subtotal - subtotal / (1 + (taxRate || 0) / 100),
+          );
         }
 
-        const newTotal = roundMoney(subtotal + (taxMode === "exclusive" ? taxAmount : 0));
+        const newTotal = roundMoney(
+          subtotal + (taxMode === "exclusive" ? taxAmount : 0),
+        );
 
         sale.subtotalAmount = subtotal;
         sale.discountAmount = totalDiscount;
@@ -2356,7 +2569,10 @@ const editReservationSale = async (req, res) => {
 
         const balanceDue = roundMoney(newTotal - completedPaymentsTotal);
 
-        sale.paymentStatus = deriveSalePaymentStatus(sale.payments, newTotal);
+        sale.paymentStatus = deriveSalePaymentStatus(
+          sale.payments,
+          newTotal,
+        );
 
         if (balanceDue > 0.01) {
           let receivable = await Receivable.findOne({
@@ -2395,7 +2611,8 @@ const editReservationSale = async (req, res) => {
             receivable.totalDue = newTotal;
             receivable.totalPaid = completedPaymentsTotal;
             receivable.balanceDue = balanceDue;
-            receivable.status = completedPaymentsTotal > 0 ? "partial" : "open";
+            receivable.status =
+              completedPaymentsTotal > 0 ? "partial" : "open";
             receivable.payments = (sale.payments || []).map((p) => ({
               method: p.method,
               amount: Number(p.amount) || 0,
@@ -2492,10 +2709,70 @@ const editReservationSale = async (req, res) => {
   });
 };
 
-/**
- * GET /sales/reports/summary
- * Sales summary for reporting
- */
+const cancelMpesaStk = async (req, res) => {
+  try {
+    const { organizationId, userId, role } = req.user;
+    const { id } = req.params;
+
+    const sale = await Sale.findOne({ _id: id, organizationId });
+    if (!sale) {
+      return res.status(404).json({ success: false, message: "Sale not found" });
+    }
+
+    const hasAccess = await userHasLocationAccess({
+      organizationId, userId, role, locationId: sale.locationId,
+    });
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied.",
+        code: "LOCATION_ACCESS_DENIED",
+      });
+    }
+
+    if (sale.paymentStatus !== "pending") {
+      return res.status(400).json({
+        success: false,
+        message: `Sale is not pending (status: ${sale.paymentStatus})`,
+      });
+    }
+
+    if (!sale.pendingMpesa?.checkoutRequestId) {
+      return res.status(400).json({
+        success: false,
+        message: "No STK push in flight for this sale",
+      });
+    }
+
+    sale.pendingMpesa = undefined;
+    sale.checkoutRequestId = undefined;
+    sale.lastModified = new Date();
+    sale.modifiedBy = userId;
+    await sale.save();
+
+    await logTokenEvent(
+      userId,
+      organizationId,
+      "sale_reassigned", // or add "mpesa_stk_cancelled" if you want a distinct event
+      req.ip,
+      req.get("user-agent"),
+      { details: `STK cancelled for sale ${sale.receiptNumber}` },
+    );
+
+    return res.status(200).json({ success: true, saleId: sale._id });
+  } catch (error) {
+    console.error("Cancel M-Pesa STK error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to cancel STK",
+      error: error.message,
+    });
+  }
+};
+
+// ---------------------------------------------------------------------------
+// getSalesSummary
+// ---------------------------------------------------------------------------
 const getSalesSummary = async (req, res) => {
   try {
     const { organizationId } = req.user;
@@ -2510,8 +2787,7 @@ const getSalesSummary = async (req, res) => {
       timeBasis,
     } = req.query;
 
-    const requestedTimeBasis =
-      timeBasis === "payment" ? "payment" : "sale";
+    const requestedTimeBasis = timeBasis === "payment" ? "payment" : "sale";
 
     const startDateObj = startDate ? new Date(startDate) : null;
     const endDateObj = endDate ? new Date(endDate) : null;
@@ -2551,16 +2827,8 @@ const getSalesSummary = async (req, res) => {
     let transactionCount = 0;
 
     const taxModeBreakdown = {
-      inclusive: {
-        transactions: 0,
-        totalRevenue: 0,
-        totalTax: 0,
-      },
-      exclusive: {
-        transactions: 0,
-        totalRevenue: 0,
-        totalTax: 0,
-      },
+      inclusive: { transactions: 0, totalRevenue: 0, totalTax: 0 },
+      exclusive: { transactions: 0, totalRevenue: 0, totalTax: 0 },
     };
 
     const accumulateSummaryTotals = ({
@@ -2580,14 +2848,18 @@ const getSalesSummary = async (req, res) => {
       totalDiscount += discountAmount;
       deliveryAmountCollected += deliveryAmount;
 
-      const baseSalesAmount = Math.max(0, grossRevenueAmount - deliveryAmount);
+      const baseSalesAmount = Math.max(
+        0,
+        grossRevenueAmount - deliveryAmount,
+      );
       salesAmountExcludingDelivery += baseSalesAmount;
 
       const netAmount = Math.max(0, baseSalesAmount - taxAmount);
       netSalesExcludingTax += netAmount;
       preDiscountSales += netAmount + discountAmount;
 
-      const mode = sale.taxMode === "exclusive" ? "exclusive" : "inclusive";
+      const mode =
+        sale.taxMode === "exclusive" ? "exclusive" : "inclusive";
       taxModeBreakdown[mode].transactions += transactionIncrement;
       taxModeBreakdown[mode].totalRevenue += grossRevenueAmount;
       taxModeBreakdown[mode].totalTax += taxAmount;
@@ -2601,11 +2873,9 @@ const getSalesSummary = async (req, res) => {
           if ((payment.status || "completed") !== "completed") {
             return false;
           }
-
           if (paymentMethod && payment.method !== paymentMethod) {
             return false;
           }
-
           return isDateWithinRange({
             value: payment.paidAt || sale.createdAt,
             startDate: startDateObj,
@@ -2619,21 +2889,20 @@ const getSalesSummary = async (req, res) => {
           netCollectedAmount: matchedNetCollected,
         } = summarizePaymentAmounts(matchedPayments);
 
-        if (matchedPayments.length === 0) {
-          continue;
-        }
-
-        if (matchedGrossAmount <= 0) {
-          continue;
-        }
+        if (matchedPayments.length === 0) continue;
+        if (matchedGrossAmount <= 0) continue;
 
         const completedTotal = getCompletedPaymentsTotal(salePayments);
         const allocationRatio =
           completedTotal > 0
-            ? Math.min(1, roundMoney(matchedGrossAmount / completedTotal))
+            ? Math.min(
+                1,
+                roundMoney(matchedGrossAmount / completedTotal),
+              )
             : 0;
         const saleDeliveryAmount = Number(sale.deliveryFeeAmount) || 0;
-        const allocatedDeliveryAmount = saleDeliveryAmount * allocationRatio;
+        const allocatedDeliveryAmount =
+          saleDeliveryAmount * allocationRatio;
 
         accumulateSummaryTotals({
           sale,
@@ -2641,21 +2910,23 @@ const getSalesSummary = async (req, res) => {
           revenueAmount: matchedNetCollected,
           exchangeCreditAmount: matchedExchangeCredit,
           taxAmount: (Number(sale.taxAmount) || 0) * allocationRatio,
-          discountAmount: (Number(sale.discountAmount) || 0) * allocationRatio,
+          discountAmount:
+            (Number(sale.discountAmount) || 0) * allocationRatio,
           deliveryAmount: allocatedDeliveryAmount,
           transactionIncrement: matchedPayments.length,
         });
 
-        if (saleDeliveryAmount > 0) {
-          deliverySalesCount += 1;
-        }
+        if (saleDeliveryAmount > 0) deliverySalesCount += 1;
         transactionCount += matchedPayments.length;
 
         for (const item of sale.items || []) {
-          const allocatedQty = (Number(item.quantity) || 0) * allocationRatio;
+          const allocatedQty =
+            (Number(item.quantity) || 0) * allocationRatio;
           if (item.type === "flexi") fleximCount += allocatedQty;
-          else if (item.type === "service") serviceCount += allocatedQty;
-          else if (item.type === "shopify") shopifyCount += allocatedQty;
+          else if (item.type === "service")
+            serviceCount += allocatedQty;
+          else if (item.type === "shopify")
+            shopifyCount += allocatedQty;
         }
       }
     } else {
@@ -2668,10 +2939,7 @@ const getSalesSummary = async (req, res) => {
               (payment.status || "completed") === "completed" &&
               payment.method === paymentMethod,
           );
-
-          if (!hasMatchingMethod) {
-            continue;
-          }
+          if (!hasMatchingMethod) continue;
         }
 
         const saleDeliveryAmount = Number(sale.deliveryFeeAmount) || 0;
@@ -2692,15 +2960,16 @@ const getSalesSummary = async (req, res) => {
           transactionIncrement: 1,
         });
 
-        if (saleDeliveryAmount > 0) {
-          deliverySalesCount += 1;
-        }
+        if (saleDeliveryAmount > 0) deliverySalesCount += 1;
         transactionCount += 1;
 
         for (const item of sale.items || []) {
-          if (item.type === "flexi") fleximCount += Number(item.quantity) || 0;
-          else if (item.type === "service") serviceCount += Number(item.quantity) || 0;
-          else if (item.type === "shopify") shopifyCount += Number(item.quantity) || 0;
+          if (item.type === "flexi")
+            fleximCount += Number(item.quantity) || 0;
+          else if (item.type === "service")
+            serviceCount += Number(item.quantity) || 0;
+          else if (item.type === "shopify")
+            shopifyCount += Number(item.quantity) || 0;
         }
       }
     }
@@ -2711,14 +2980,18 @@ const getSalesSummary = async (req, res) => {
     totalTax = roundMoney(totalTax);
     totalDiscount = roundMoney(totalDiscount);
     deliveryAmountCollected = roundMoney(deliveryAmountCollected);
-    salesAmountExcludingDelivery = roundMoney(salesAmountExcludingDelivery);
+    salesAmountExcludingDelivery = roundMoney(
+      salesAmountExcludingDelivery,
+    );
     netSalesExcludingTax = roundMoney(netSalesExcludingTax);
     preDiscountSales = roundMoney(preDiscountSales);
     let subtotalExclCreditAndDiscount = Math.max(
       0,
       preDiscountSales - exchangeCreditApplied - totalDiscount,
     );
-    subtotalExclCreditAndDiscount = roundMoney(subtotalExclCreditAndDiscount);
+    subtotalExclCreditAndDiscount = roundMoney(
+      subtotalExclCreditAndDiscount,
+    );
     const roundedFlexiCount = Math.round(fleximCount);
     const roundedServiceCount = Math.round(serviceCount);
     const roundedShopifyCount = Math.round(shopifyCount);
@@ -2755,7 +3028,10 @@ const getSalesSummary = async (req, res) => {
 
       totalExpenses = roundMoney(expenseAgg[0]?.total || 0);
     } catch (expErr) {
-      console.error("Failed to aggregate expenses for sales summary:", expErr);
+      console.error(
+        "Failed to aggregate expenses for sales summary:",
+        expErr,
+      );
       totalExpenses = 0;
     }
 
@@ -2766,7 +3042,9 @@ const getSalesSummary = async (req, res) => {
         totalRevenue: roundMoney(totals.totalRevenue),
         totalTax: roundMoney(totals.totalTax),
       }))
-      .filter((entry) => entry.transactions > 0 || entry.totalRevenue > 0);
+      .filter(
+        (entry) => entry.transactions > 0 || entry.totalRevenue > 0,
+      );
 
     const taxDisplayMode =
       modeEntries.length > 1
@@ -2777,7 +3055,7 @@ const getSalesSummary = async (req, res) => {
 
     res.json({
       success: true,
-        data: {
+      data: {
         totalSales: transactionCount,
         totalRevenue,
         grossRevenue,
@@ -2786,7 +3064,7 @@ const getSalesSummary = async (req, res) => {
         salesAmountExcludingDelivery,
         netSalesExcludingTax,
         preDiscountSales,
-          subtotalExclCreditAndDiscount,
+        subtotalExclCreditAndDiscount,
         totalTax,
         totalDiscount,
         deliveryAmountCollected,
@@ -2796,40 +3074,45 @@ const getSalesSummary = async (req, res) => {
             ? roundMoney(netSalesExcludingTax - totalExpenses)
             : null,
         expenseToRevenueRatio:
-          grossRevenue > 0 ? roundMoney((totalExpenses / grossRevenue) * 100) : 0,
+          grossRevenue > 0
+            ? roundMoney((totalExpenses / grossRevenue) * 100)
+            : 0,
         taxDisplayMode,
         taxModeBreakdown: {
-          inclusive: modeEntries.find((entry) => entry.mode === "inclusive") || {
-            mode: "inclusive",
-            transactions: 0,
-            totalRevenue: 0,
-            totalTax: 0,
-          },
-          exclusive: modeEntries.find((entry) => entry.mode === "exclusive") || {
-            mode: "exclusive",
-            transactions: 0,
-            totalRevenue: 0,
-            totalTax: 0,
-          },
+          inclusive: modeEntries.find(
+            (entry) => entry.mode === "inclusive",
+          ) || { mode: "inclusive", transactions: 0, totalRevenue: 0, totalTax: 0 },
+          exclusive: modeEntries.find(
+            (entry) => entry.mode === "exclusive",
+          ) || { mode: "exclusive", transactions: 0, totalRevenue: 0, totalTax: 0 },
         },
         deliverySalesCount,
         deliveryAmountShareOfRevenue:
           grossRevenue > 0
-            ? roundMoney((deliveryAmountCollected / grossRevenue) * 100)
+            ? roundMoney(
+                (deliveryAmountCollected / grossRevenue) * 100,
+              )
             : 0,
         deliveryAmountShareOfNetRevenue:
           totalRevenue > 0
-            ? roundMoney((deliveryAmountCollected / totalRevenue) * 100)
+            ? roundMoney(
+                (deliveryAmountCollected / totalRevenue) * 100,
+              )
             : 0,
         averageTransactionValue:
-          transactionCount > 0 ? roundMoney(totalRevenue / transactionCount) : 0,
+          transactionCount > 0
+            ? roundMoney(totalRevenue / transactionCount)
+            : 0,
         averageGrossTransactionValue:
-          transactionCount > 0 ? roundMoney(grossRevenue / transactionCount) : 0,
+          transactionCount > 0
+            ? roundMoney(grossRevenue / transactionCount)
+            : 0,
         itemsSold: {
           flexi: roundedFlexiCount,
           service: roundedServiceCount,
           shopify: roundedShopifyCount,
-          total: roundedFlexiCount + roundedServiceCount + roundedShopifyCount,
+          total:
+            roundedFlexiCount + roundedServiceCount + roundedShopifyCount,
         },
         timeBasis: requestedTimeBasis,
         paymentMethodBreakdown: await getPaymentMethodBreakdown({
@@ -2851,9 +3134,6 @@ const getSalesSummary = async (req, res) => {
   }
 };
 
-/**
- * Helper: Get payment method breakdown
- */
 async function getPaymentMethodBreakdown({
   filter,
   timeBasis = "sale",
@@ -2919,22 +3199,21 @@ async function getPaymentMethodBreakdown({
   for (const methodData of Object.values(map)) {
     methodData.total = roundMoney(methodData.total);
     methodData.netCollected = roundMoney(methodData.netCollected);
-    methodData.exchangeCreditApplied = roundMoney(methodData.exchangeCreditApplied);
+    methodData.exchangeCreditApplied = roundMoney(
+      methodData.exchangeCreditApplied,
+    );
   }
 
   return map;
 }
 
-/**
- * Helper: Reverse inventory updates (used for voids and full refunds)
- */
-/**
- * Helper: Reverse inventory updates (used for voids and full refunds)
- */
+// ---------------------------------------------------------------------------
+// reverseInventoryUpdates
+// ---------------------------------------------------------------------------
 async function reverseInventoryUpdates(sale, organizationId) {
-  const connection = await ShopifyConnection.findOne({ organizationId }).select(
-    "+clientId +clientSecret +accessToken +tokenExpiresAt",
-  );
+  const connection = await ShopifyConnection.findOne({
+    organizationId,
+  }).select("+clientId +clientSecret +accessToken +tokenExpiresAt");
   const flexiLocation = await Location.findOne({
     _id: sale.locationId,
     organizationId,
@@ -2943,7 +3222,6 @@ async function reverseInventoryUpdates(sale, organizationId) {
   for (let i = 0; i < sale.items.length; i++) {
     const item = sale.items[i];
 
-    // ---------- FLEXI (variant-level) ----------
     if (item.type === "flexi") {
       if (!item.variantId) {
         sale.inventoryUpdates.push({
@@ -3019,10 +3297,7 @@ async function reverseInventoryUpdates(sale, organizationId) {
           error: error.message,
         });
       }
-    }
-
-    // ---------- SHOPIFY (unchanged) ----------
-    else if (item.type === "shopify" && connection) {
+    } else if (item.type === "shopify" && connection) {
       try {
         await updateShopifyInventory(
           organizationId,
@@ -3046,10 +3321,6 @@ async function reverseInventoryUpdates(sale, organizationId) {
         );
 
         if (error.permanent === true) {
-          console.error(
-            `[Sales] Permanent Shopify sync failure for variant ${item.shopifyVariantId} (reversal) — not queuing:`,
-            error.message,
-          );
           sale.inventoryUpdates.push({
             itemId: i.toString(),
             type: "shopify",
@@ -3110,13 +3381,17 @@ async function reverseInventoryUpdates(sale, organizationId) {
   );
 }
 
-/**
- * Helper: Reverse inventory for specific refunded items
- */
-async function reverseInventoryForItems(sale, organizationId, refundedItems) {
-  const connection = await ShopifyConnection.findOne({ organizationId }).select(
-    "+clientId +clientSecret +accessToken +tokenExpiresAt",
-  );
+// ---------------------------------------------------------------------------
+// reverseInventoryForItems
+// ---------------------------------------------------------------------------
+async function reverseInventoryForItems(
+  sale,
+  organizationId,
+  refundedItems,
+) {
+  const connection = await ShopifyConnection.findOne({
+    organizationId,
+  }).select("+clientId +clientSecret +accessToken +tokenExpiresAt");
   const flexiLocation = await Location.findOne({
     _id: sale.locationId,
     organizationId,
@@ -3125,7 +3400,6 @@ async function reverseInventoryForItems(sale, organizationId, refundedItems) {
   for (const refundItem of refundedItems) {
     const { itemIndex, quantity, saleItem } = refundItem;
 
-    // ---------- FLEXI (variant-level) ----------
     if (saleItem.type === "flexi") {
       try {
         const inventory = await Inventory.findOne({
@@ -3189,10 +3463,7 @@ async function reverseInventoryForItems(sale, organizationId, refundedItems) {
           error: error.message,
         });
       }
-    }
-
-    // ---------- SHOPIFY (unchanged) ----------
-    else if (saleItem.type === "shopify" && connection) {
+    } else if (saleItem.type === "shopify" && connection) {
       try {
         await updateShopifyInventory(
           organizationId,
@@ -3216,10 +3487,6 @@ async function reverseInventoryForItems(sale, organizationId, refundedItems) {
         );
 
         if (error.permanent === true) {
-          console.error(
-            `[Sales] Permanent Shopify sync failure for variant ${saleItem.shopifyVariantId} (refund reversal) — not queuing:`,
-            error.message,
-          );
           sale.inventoryUpdates.push({
             itemId: `refund-${itemIndex}`,
             type: "shopify",
@@ -3279,10 +3546,9 @@ async function reverseInventoryForItems(sale, organizationId, refundedItems) {
   );
 }
 
-/**
- * GET /reports/by-delivery-category
- * Get sales breakdown by delivery category with metrics
- */
+// ---------------------------------------------------------------------------
+// Delivery reports
+// ---------------------------------------------------------------------------
 const getDeliveryCategoryReport = async (req, res) => {
   try {
     const { organizationId } = req.user;
@@ -3317,7 +3583,8 @@ const getDeliveryCategoryReport = async (req, res) => {
     for (const sale of sales) {
       const category = sale.deliveryCategory || "Uncategorized";
       const option = sale.deliveryOption || "Standard";
-      const catStatus = sale.categoryStatus || sale.deliveryStatus || "pending";
+      const catStatus =
+        sale.categoryStatus || sale.deliveryStatus || "pending";
 
       if (!categoryMap[category]) {
         categoryMap[category] = {
@@ -3333,8 +3600,7 @@ const getDeliveryCategoryReport = async (req, res) => {
       const categoryRecord = categoryMap[category];
       categoryRecord.count += 1;
       categoryRecord.revenue += Number(sale.totalAmount) || 0;
-      categoryRecord.deliveryFees +=
-        (sale.deliveryInfo?.deliveryFee || 0);
+      categoryRecord.deliveryFees += sale.deliveryInfo?.deliveryFee || 0;
 
       if (!categoryRecord.byOption[option]) {
         categoryRecord.byOption[option] = { count: 0, revenue: 0 };
@@ -3358,22 +3624,21 @@ const getDeliveryCategoryReport = async (req, res) => {
     for (const [category, data] of Object.entries(categoryMap)) {
       byCategory[category] = {
         ...data,
-        percentage: totalRevenue > 0 ? 
-          ((data.revenue / totalRevenue) * 100).toFixed(2) + "%" : 
-          "0%",
-        avgFee: data.count > 0 ? 
-          (data.deliveryFees / data.count).toFixed(2) : 
-          "0",
+        percentage:
+          totalRevenue > 0
+            ? ((data.revenue / totalRevenue) * 100).toFixed(2) + "%"
+            : "0%",
+        avgFee:
+          data.count > 0
+            ? (data.deliveryFees / data.count).toFixed(2)
+            : "0",
       };
     }
 
     res.json({
       success: true,
       data: {
-        period: {
-          startDate,
-          endDate,
-        },
+        period: { startDate, endDate },
         summary: {
           totalCategories: Object.keys(byCategory).length,
           totalDeliveries: sales.length,
@@ -3393,10 +3658,6 @@ const getDeliveryCategoryReport = async (req, res) => {
   }
 };
 
-/**
- * GET /reports/delivery-metrics
- * Get high-level delivery KPIs and performance metrics
- */
 const getDeliveryMetrics = async (req, res) => {
   try {
     const { organizationId } = req.user;
@@ -3423,7 +3684,11 @@ const getDeliveryMetrics = async (req, res) => {
 
     const allDeliveries = await Sale.find(filter).lean();
 
-    const successStatuses = ["delivered", "completed", "completed-successfully"];
+    const successStatuses = [
+      "delivered",
+      "completed",
+      "completed-successfully",
+    ];
     const failedStatuses = ["failed", "undeliverable", "cancelled"];
 
     let successfulCount = 0;
@@ -3432,10 +3697,9 @@ const getDeliveryMetrics = async (req, res) => {
     let totalRevenue = 0;
 
     for (const sale of allDeliveries) {
-      const saleStatus = sale.categoryStatus || 
-                        sale.deliveryStatus || 
-                        "pending";
-      
+      const saleStatus =
+        sale.categoryStatus || sale.deliveryStatus || "pending";
+
       if (successStatuses.includes(saleStatus.toLowerCase())) {
         successfulCount += 1;
       } else if (failedStatuses.includes(saleStatus.toLowerCase())) {
@@ -3447,31 +3711,33 @@ const getDeliveryMetrics = async (req, res) => {
     }
 
     const totalDeliveries = allDeliveries.length;
-    const successRate = totalDeliveries > 0 ? 
-      ((successfulCount / totalDeliveries) * 100).toFixed(2) : 
-      "0";
-    const failureRate = totalDeliveries > 0 ? 
-      ((failedCount / totalDeliveries) * 100).toFixed(2) : 
-      "0";
-    const avgDeliveryFee = totalDeliveries > 0 ? 
-      (totalDeliveryFees / totalDeliveries).toFixed(2) : 
-      "0";
-    const feePercentage = totalRevenue > 0 ? 
-      ((totalDeliveryFees / totalRevenue) * 100).toFixed(2) : 
-      "0";
+    const successRate =
+      totalDeliveries > 0
+        ? ((successfulCount / totalDeliveries) * 100).toFixed(2)
+        : "0";
+    const failureRate =
+      totalDeliveries > 0
+        ? ((failedCount / totalDeliveries) * 100).toFixed(2)
+        : "0";
+    const avgDeliveryFee =
+      totalDeliveries > 0
+        ? (totalDeliveryFees / totalDeliveries).toFixed(2)
+        : "0";
+    const feePercentage =
+      totalRevenue > 0
+        ? ((totalDeliveryFees / totalRevenue) * 100).toFixed(2)
+        : "0";
 
     res.json({
       success: true,
       data: {
-        period: {
-          startDate,
-          endDate,
-        },
+        period: { startDate, endDate },
         metrics: {
           totalDeliveries,
           successfulDeliveries: successfulCount,
           failedDeliveries: failedCount,
-          pendingDeliveries: totalDeliveries - successfulCount - failedCount,
+          pendingDeliveries:
+            totalDeliveries - successfulCount - failedCount,
           successRate: successRate + "%",
           failureRate: failureRate + "%",
           totalDeliveryFees: totalDeliveryFees.toFixed(2),
@@ -3490,10 +3756,6 @@ const getDeliveryMetrics = async (req, res) => {
   }
 };
 
-/**
- * GET /reports/delivery-status-flow
- * Get distribution of deliveries across different statuses (bottleneck analysis)
- */
 const getDeliveryStatusFlow = async (req, res) => {
   try {
     const { organizationId } = req.user;
@@ -3527,10 +3789,8 @@ const getDeliveryStatusFlow = async (req, res) => {
 
     for (const delivery of deliveries) {
       totalDeliveries += 1;
-      const status = 
-        delivery.categoryStatus || 
-        delivery.deliveryStatus || 
-        "pending";
+      const status =
+        delivery.categoryStatus || delivery.deliveryStatus || "pending";
 
       if (!statusCounts[status]) {
         statusCounts[status] = 0;
@@ -3543,9 +3803,10 @@ const getDeliveryStatusFlow = async (req, res) => {
 
     for (const [status, count] of Object.entries(statusCounts)) {
       statusFlow[status] = count;
-      percentages[status] = totalDeliveries > 0 ? 
-        ((count / totalDeliveries) * 100).toFixed(2) + "%" : 
-        "0%";
+      percentages[status] =
+        totalDeliveries > 0
+          ? ((count / totalDeliveries) * 100).toFixed(2) + "%"
+          : "0%";
     }
 
     const sortedFlow = Object.entries(statusFlow)
@@ -3565,10 +3826,7 @@ const getDeliveryStatusFlow = async (req, res) => {
     res.json({
       success: true,
       data: {
-        period: {
-          startDate,
-          endDate,
-        },
+        period: { startDate, endDate },
         totalDeliveries,
         statusFlow: sortedFlow,
         percentages: sortedPercentages,
@@ -3585,88 +3843,21 @@ const getDeliveryStatusFlow = async (req, res) => {
   }
 };
 
-// Routes
-router.post(
-  "/",
-  requirePermission("create_sale"),
-  validateLocationAccess,
-  createSale,
-);
-router.get(
-  "/reports/summary",
-  requirePermission("view_reports"),
-  getSalesSummary,
-);
-router.get(
-  "/reports/by-delivery-category",
-  requirePermission("view_reports"),
-  getDeliveryCategoryReport,
-);
-router.get(
-  "/reports/delivery-metrics",
-  requirePermission("view_reports"),
-  getDeliveryMetrics,
-);
-router.get(
-  "/reports/delivery-status-flow",
-  requirePermission("view_reports"),
-  getDeliveryStatusFlow,
-);
-router.get(
-  "/receivables",
-  requirePermission("view_sale_history"),
-  listReceivables,
-);
-router.get(
-  "/:id/receivable",
-  requirePermission("view_sale_history"),
-  getSaleReceivable,
-);
-router.post(
-  "/:id/payments",
-  requirePermission("create_sale"),
-  recordSalePayment,
-);
-router.patch(
-  "/:id/payments/reallocate",
-  requirePermission("edit_sale"),
-  reallocateSalePayment,
-);
-router.patch(
-  "/:id/reservation",
-  requirePermission("edit_sale"),
-  editReservationSale,
-);
-router.get("/:id", requirePermission("view_sale_history"), getSale);
-router.get("/", requirePermission("view_sale_history"), listSales);
-router.post("/:id/void", requirePermission("refund_sale"), voidSale);
-router.post("/:id/refund", requirePermission("refund_sale"), refundSale);
-
-/**
- * POST /sales/:id/mpesa-stk
- * Fire a Daraja STK push for an existing pending POS sale.
- * Body: { phone: string }
- */
-const startMpesaStk = async (req, res) => {
-  const tag = "[POS STK]";
+// ---------------------------------------------------------------------------
+// reassignSale
+// ---------------------------------------------------------------------------
+const reassignSale = async (req, res) => {
   try {
     const { organizationId, userId, role } = req.user;
     const { id } = req.params;
-    const { phone } = req.body || {};
-
-    console.log(tag, "start", { saleId: id, phone, orgId: String(organizationId) });
-
-    if (!phone) {
-      console.warn(tag, "missing phone");
-      return res.status(400).json({ success: false, message: "phone is required" });
-    }
+    const { cashierId, assignedUser, items } = req.body || {};
 
     const sale = await Sale.findOne({ _id: id, organizationId });
     if (!sale) {
-      console.warn(tag, "sale not found", id);
-      return res.status(404).json({ success: false, message: "Sale not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Sale not found" });
     }
-    console.log(tag, "sale found", { saleId: String(sale._id), paymentStatus: sale.paymentStatus, salesChannel: sale.salesChannel, total: sale.totalAmount });
 
     const hasAccess = await userHasLocationAccess({
       organizationId,
@@ -3675,7 +3866,366 @@ const startMpesaStk = async (req, res) => {
       locationId: sale.locationId,
     });
     if (!hasAccess) {
-      console.warn(tag, "no location access", { userId, locationId: String(sale.locationId) });
+      return res.status(403).json({
+        success: false,
+        message: "Access denied. You do not have access to this location.",
+        code: "LOCATION_ACCESS_DENIED",
+      });
+    }
+
+    if (sale.status === "voided") {
+      return res.status(400).json({
+        success: false,
+        message: "Cannot reassign a voided sale",
+      });
+    }
+
+    const changes = [];
+
+    // ---- Cashier ----
+    if (cashierId !== undefined) {
+      if (cashierId === null || cashierId === "") {
+        return res
+          .status(400)
+          .json({ success: false, message: "cashierId cannot be empty" });
+      }
+      if (!mongoose.Types.ObjectId.isValid(cashierId)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "cashierId is invalid" });
+      }
+      const newCashier = await User.findById(cashierId)
+        .select("fullname email")
+        .lean();
+      if (!newCashier) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Cashier user not found" });
+      }
+      const oldCashierId = sale.cashierId ? String(sale.cashierId) : null;
+      if (oldCashierId !== String(cashierId)) {
+        sale.cashierId = cashierId;
+        changes.push({
+          field: "cashierId",
+          from: oldCashierId,
+          to: String(cashierId),
+        });
+      }
+    }
+
+    // ---- Sale-level assigned user ----
+    if (assignedUser !== undefined) {
+      if (assignedUser === null || assignedUser === "") {
+        const oldVal = sale.assignedUser ? String(sale.assignedUser) : null;
+        if (oldVal) {
+          sale.assignedUser = null;
+          changes.push({
+            field: "assignedUser",
+            from: oldVal,
+            to: null,
+          });
+        }
+      } else {
+        if (!mongoose.Types.ObjectId.isValid(assignedUser)) {
+          return res
+            .status(400)
+            .json({ success: false, message: "assignedUser is invalid" });
+        }
+        const newUser = await User.findById(assignedUser)
+          .select("fullname email commissionOverrides")
+          .lean();
+        if (!newUser) {
+          return res
+            .status(400)
+            .json({ success: false, message: "Assigned user not found" });
+        }
+        const oldVal = sale.assignedUser ? String(sale.assignedUser) : null;
+        if (oldVal !== String(assignedUser)) {
+          sale.assignedUser = assignedUser;
+          changes.push({
+            field: "assignedUser",
+            from: oldVal,
+            to: String(assignedUser),
+          });
+        }
+      }
+    }
+
+    // ---- Propagate sale-level assignedUser to unassigned service lines ----
+    if (
+      req.body?.propagateToUnassigned === true &&
+      assignedUser !== undefined
+    ) {
+      const nextSaleAssignee =
+        assignedUser === null || assignedUser === ""
+          ? null
+          : assignedUser;
+
+      const targetUser = nextSaleAssignee
+        ? await User.findById(nextSaleAssignee)
+            .select("fullname email commissionOverrides")
+            .lean()
+        : null;
+
+      if (nextSaleAssignee && !targetUser) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Assigned user not found" });
+      }
+
+      for (let idx = 0; idx < sale.items.length; idx++) {
+        const item = sale.items[idx];
+        if (item.type !== "service") continue;
+        if (item.assignedUser) continue;
+
+        const product = await Product.findById(item.productId)
+          .select("commissionType commissionValue")
+          .lean();
+
+        const defaults = {
+          type: product?.commissionType || "percentage",
+          value: Number(product?.commissionValue) || 0,
+        };
+
+        let effectiveType = defaults.type;
+        let effectiveValue = defaults.value;
+        let isOverride = false;
+
+        if (targetUser?.commissionOverrides && product?._id) {
+          const override = targetUser.commissionOverrides.find(
+            (ov) => String(ov.serviceId) === String(product._id),
+          );
+          if (override) {
+            effectiveType = override.commissionType || effectiveType;
+            effectiveValue = Number(override.commissionValue) || 0;
+            isOverride = true;
+          }
+        }
+
+        const base = Number(item.laborCost) || 0;
+        let commissionAmount = 0;
+        if (effectiveType === "percentage") {
+          commissionAmount = (base * effectiveValue) / 100;
+        } else {
+          commissionAmount = Math.min(effectiveValue, base);
+        }
+        commissionAmount = Math.round(commissionAmount * 100) / 100;
+
+        item.assignedUser = nextSaleAssignee;
+        item.commissionType = effectiveType;
+        item.commissionValue = effectiveValue;
+        item.commissionAmount = commissionAmount;
+
+        changes.push({
+          field: `items[${idx}].assignedUser`,
+          from: null,
+          to: nextSaleAssignee ? String(nextSaleAssignee) : null,
+          extra: {
+            reason: "propagated_from_default",
+            commissionType: effectiveType,
+            commissionValue: effectiveValue,
+            commissionAmount,
+            isOverride,
+          },
+        });
+      }
+    }
+
+    // ---- Per-item assignment ----
+    if (Array.isArray(items) && items.length > 0) {
+      const newUserIds = [
+        ...new Set(
+          items
+            .map((it) => it?.assignedUser)
+            .filter((v) => v && mongoose.Types.ObjectId.isValid(v)),
+        ),
+      ];
+      const newUsers = await User.find({ _id: { $in: newUserIds } })
+        .select("fullname email commissionOverrides")
+        .lean();
+      const userById = new Map(newUsers.map((u) => [String(u._id), u]));
+
+      for (const edit of items) {
+        const itemIndex = Number(edit?.itemIndex);
+        if (
+          !Number.isInteger(itemIndex) ||
+          itemIndex < 0 ||
+          itemIndex >= sale.items.length
+        ) {
+          return res.status(400).json({
+            success: false,
+            message: `Invalid itemIndex ${edit?.itemIndex}`,
+          });
+        }
+
+        const item = sale.items[itemIndex];
+        if (item.type !== "service") {
+          return res.status(400).json({
+            success: false,
+            message: `Item ${itemIndex} is not a service — only service lines have an assignee`,
+          });
+        }
+
+        const rawAssignee = edit?.assignedUser;
+        const nextAssignee =
+          rawAssignee === null || rawAssignee === ""
+            ? null
+            : String(rawAssignee);
+
+        if (nextAssignee && !userById.has(nextAssignee)) {
+          return res.status(400).json({
+            success: false,
+            message: `Assigned user ${nextAssignee} not found`,
+          });
+        }
+
+        const currentAssignee = item.assignedUser
+          ? String(item.assignedUser)
+          : null;
+        if (currentAssignee === nextAssignee) continue;
+
+        const product = await Product.findById(item.productId)
+          .select("commissionType commissionValue laborCost")
+          .lean();
+
+        const defaults = {
+          type: product?.commissionType || "percentage",
+          value: Number(product?.commissionValue) || 0,
+        };
+
+        let effectiveType = defaults.type;
+        let effectiveValue = defaults.value;
+        let isOverride = false;
+
+        const userObj = nextAssignee ? userById.get(nextAssignee) : null;
+        if (userObj?.commissionOverrides && product?._id) {
+          const override = userObj.commissionOverrides.find(
+            (ov) => String(ov.serviceId) === String(product._id),
+          );
+          if (override) {
+            effectiveType = override.commissionType || effectiveType;
+            effectiveValue = Number(override.commissionValue) || 0;
+            isOverride = true;
+          }
+        }
+
+        const base = Number(item.laborCost) || 0;
+        let commissionAmount = 0;
+        if (effectiveType === "percentage") {
+          commissionAmount = (base * effectiveValue) / 100;
+        } else {
+          commissionAmount = Math.min(effectiveValue, base);
+        }
+        commissionAmount = Math.round(commissionAmount * 100) / 100;
+
+        item.assignedUser = nextAssignee;
+        item.commissionType = effectiveType;
+        item.commissionValue = effectiveValue;
+        item.commissionAmount = commissionAmount;
+
+        changes.push({
+          field: `items[${itemIndex}].assignedUser`,
+          from: currentAssignee,
+          to: nextAssignee,
+          extra: {
+            commissionType: effectiveType,
+            commissionValue: effectiveValue,
+            commissionAmount,
+            isOverride,
+          },
+        });
+      }
+    }
+
+    if (changes.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: "No changes",
+        data: sale,
+      });
+    }
+
+    sale.lastModified = new Date();
+    sale.modifiedBy = userId;
+    await sale.save();
+
+    await logTokenEvent(
+      userId,
+      organizationId,
+      "sale_reassigned",
+      req.ip,
+      req.get("user-agent"),
+      {
+        details: `Sale ${sale.receiptNumber} reassigned (${changes.length} change${
+          changes.length === 1 ? "" : "s"
+        })`,
+      },
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Assignment updated",
+      data: sale,
+      changes,
+    });
+  } catch (error) {
+    console.error("Reassign sale error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to reassign sale",
+      error: error.message,
+    });
+  }
+};
+
+// ---------------------------------------------------------------------------
+// STK flow
+// ---------------------------------------------------------------------------
+const startMpesaStk = async (req, res) => {
+  const tag = "[POS STK]";
+  try {
+    const { organizationId, userId, role } = req.user;
+    const { id } = req.params;
+    const { phone } = req.body || {};
+
+    console.log(tag, "start", {
+      saleId: id,
+      phone,
+      orgId: String(organizationId),
+    });
+
+    if (!phone) {
+      console.warn(tag, "missing phone");
+      return res
+        .status(400)
+        .json({ success: false, message: "phone is required" });
+    }
+
+    const sale = await Sale.findOne({ _id: id, organizationId });
+    if (!sale) {
+      console.warn(tag, "sale not found", id);
+      return res
+        .status(404)
+        .json({ success: false, message: "Sale not found" });
+    }
+    console.log(tag, "sale found", {
+      saleId: String(sale._id),
+      paymentStatus: sale.paymentStatus,
+      salesChannel: sale.salesChannel,
+      total: sale.totalAmount,
+    });
+
+    const hasAccess = await userHasLocationAccess({
+      organizationId,
+      userId,
+      role,
+      locationId: sale.locationId,
+    });
+    if (!hasAccess) {
+      console.warn(tag, "no location access", {
+        userId,
+        locationId: String(sale.locationId),
+      });
       return res.status(403).json({
         success: false,
         message: "Access denied. You do not have access to this location.",
@@ -3692,7 +4242,11 @@ const startMpesaStk = async (req, res) => {
     }
 
     if (sale.pendingMpesa?.checkoutRequestId) {
-      console.warn(tag, "already in flight", sale.pendingMpesa.checkoutRequestId);
+      console.warn(
+        tag,
+        "already in flight",
+        sale.pendingMpesa.checkoutRequestId,
+      );
       return res.status(409).json({
         success: false,
         message: "An STK push is already in flight for this sale",
@@ -3703,14 +4257,18 @@ const startMpesaStk = async (req, res) => {
     const org = await Organization.findById(organizationId).lean();
     if (!org) {
       console.error(tag, "org not found", String(organizationId));
-      return res.status(404).json({ success: false, message: "Organization not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Organization not found" });
     }
     const orgLocation = await Location.findById(sale.locationId)
       .select("paymentMethods mpesaStkEnabled")
       .lean();
     if (!orgLocation) {
       console.error(tag, "location not found", String(sale.locationId));
-      return res.status(404).json({ success: false, message: "Location not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Location not found" });
     }
 
     console.log(tag, "org + location loaded", {
@@ -3734,7 +4292,8 @@ const startMpesaStk = async (req, res) => {
       locOverride === false
         ? false
         : locOverride === true
-          ? org?.daraja?.enabled === true && org?.daraja?.mpesaStkEnabled === true
+          ? org?.daraja?.enabled === true &&
+            org?.daraja?.mpesaStkEnabled === true
           : orgEnabled;
 
     console.log(tag, "stk available?", stkAvailable);
@@ -3749,7 +4308,8 @@ const startMpesaStk = async (req, res) => {
       console.error(tag, "missing consumer credentials");
       return res.status(400).json({
         success: false,
-        message: "Daraja credentials are not configured for this organization",
+        message:
+          "Daraja credentials are not configured for this organization",
       });
     }
     if (!org?.daraja?.shortcode || !org?.daraja?.passkey) {
@@ -3767,7 +4327,6 @@ const startMpesaStk = async (req, res) => {
       });
     }
 
-    const secretBox = require("../services/secretBox");
     const daraja = require("../services/daraja");
 
     let consumerKey, consumerSecret, passkey, callbackSecret;
@@ -3779,18 +4338,26 @@ const startMpesaStk = async (req, res) => {
       console.error(tag, "primary secret decrypt failed:", decErr.message);
       return res.status(500).json({
         success: false,
-        message: "Failed to decrypt Daraja credentials: " + decErr.message,
+        message:
+          "Failed to decrypt Daraja credentials: " + decErr.message,
       });
     }
 
     const cb = decryptOrPlaintext(org.daraja.callbackSecret);
     callbackSecret = cb.value;
     if (cb.wasPlaintext && callbackSecret) {
-      console.warn(tag, "legacy plaintext callbackSecret — re-encrypting");
+      console.warn(
+        tag,
+        "legacy plaintext callbackSecret — re-encrypting",
+      );
       try {
         await Organization.updateOne(
           { _id: organizationId },
-          { $set: { "daraja.callbackSecret": secretBox.encrypt(callbackSecret) } },
+          {
+            $set: {
+              "daraja.callbackSecret": secretBox.encrypt(callbackSecret),
+            },
+          },
         );
       } catch (reencErr) {
         console.error(tag, "re-encrypt failed:", reencErr.message);
@@ -3803,10 +4370,13 @@ const startMpesaStk = async (req, res) => {
       console.error(tag, "PUBLIC_API_URL invalid");
       return res.status(500).json({
         success: false,
-        message: "PUBLIC_API_URL must be set and https for Daraja callbacks",
+        message:
+          "PUBLIC_API_URL must be set and https for Daraja callbacks",
       });
     }
-    const callbackUrl = `${apiUrl}/storefront/mpesa/callback?key=${encodeURIComponent(callbackSecret)}`;
+    const callbackUrl = `${apiUrl}/storefront/mpesa/callback?key=${encodeURIComponent(
+      callbackSecret,
+    )}`;
     console.log(tag, "callbackUrl =", callbackUrl);
 
     const completedTotal = getCompletedPaymentsTotal(sale.payments || []);
@@ -3887,21 +4457,21 @@ const startMpesaStk = async (req, res) => {
   }
 };
 
-/**
- * GET /sales/:id/payment-status
- * Polling endpoint for the POS waiting modal.
- */
 const getSalePaymentStatus = async (req, res) => {
   try {
     const { organizationId, userId, role } = req.user;
     const { id } = req.params;
 
     const sale = await Sale.findOne({ _id: id, organizationId })
-      .select("_id paymentStatus payments pendingMpesa checkoutRequestId totalAmount locationId")
+      .select(
+        "_id paymentStatus payments pendingMpesa checkoutRequestId totalAmount locationId",
+      )
       .lean();
 
     if (!sale) {
-      return res.status(404).json({ success: false, message: "Sale not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Sale not found" });
     }
 
     const hasAccess = await userHasLocationAccess({
@@ -3928,11 +4498,14 @@ const getSalePaymentStatus = async (req, res) => {
       paymentStatus: sale.paymentStatus,
       mpesaReceiptNumber: mpesaReceipt?.reference || null,
       checkoutRequestId:
-        sale.pendingMpesa?.checkoutRequestId || sale.checkoutRequestId || null,
+        sale.pendingMpesa?.checkoutRequestId ||
+        sale.checkoutRequestId ||
+        null,
       amountDue: roundMoney(
         Math.max(
           0,
-          (sale.totalAmount || 0) - getCompletedPaymentsTotal(sale.payments || []),
+          (sale.totalAmount || 0) -
+            getCompletedPaymentsTotal(sale.payments || []),
         ),
       ),
     });
@@ -3946,11 +4519,6 @@ const getSalePaymentStatus = async (req, res) => {
   }
 };
 
-/**
- * POST /sales/:id/mpesa-stk/mark-paid
- * Manual fallback: cashier confirms M-Pesa payment outside the API.
- * Body: { reference?: string }
- */
 const markMpesaStkPaidManually = async (req, res) => {
   const session = await Sale.startSession();
   try {
@@ -3960,10 +4528,14 @@ const markMpesaStkPaidManually = async (req, res) => {
 
     session.startTransaction();
 
-    const sale = await Sale.findOne({ _id: id, organizationId }).session(session);
+    const sale = await Sale.findOne({ _id: id, organizationId }).session(
+      session,
+    );
     if (!sale) {
       await session.abortTransaction();
-      return res.status(404).json({ success: false, message: "Sale not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Sale not found" });
     }
 
     const hasAccess = await userHasLocationAccess({
@@ -3990,7 +4562,9 @@ const markMpesaStkPaidManually = async (req, res) => {
     }
 
     const completedTotal = getCompletedPaymentsTotal(sale.payments || []);
-    const amountDue = roundMoney((sale.totalAmount || 0) - completedTotal);
+    const amountDue = roundMoney(
+      (sale.totalAmount || 0) - completedTotal,
+    );
     if (amountDue <= 0) {
       await session.abortTransaction();
       return res.status(400).json({
@@ -4008,16 +4582,21 @@ const markMpesaStkPaidManually = async (req, res) => {
       paidAt: new Date(),
     });
 
-    sale.paymentStatus = deriveSalePaymentStatus(sale.payments, sale.totalAmount);
+    sale.paymentStatus = deriveSalePaymentStatus(
+      sale.payments,
+      sale.totalAmount,
+    );
     sale.status = "completed";
     sale.completedAt = new Date();
     sale.pendingMpesa = undefined;
 
-    // Apply deferred inventory
     try {
       await processInventoryUpdates(sale, organizationId, session);
     } catch (invErr) {
-      console.error("[POS STK mark-paid] inventory update failed:", invErr.message);
+      console.error(
+        "[POS STK mark-paid] inventory update failed:",
+        invErr.message,
+      );
       sale.inventoryStatus = "failed";
     }
 
@@ -4043,12 +4622,6 @@ const markMpesaStkPaidManually = async (req, res) => {
   }
 };
 
-/**
- * DELETE /sales/:id/pending
- * Cancel a pending POS sale (cart stays in the client, sale is deleted).
- * Only valid when paymentStatus === "pending" and salesChannel === "pos".
- * No inventory reversal — nothing was deducted.
- */
 const deletePendingSale = async (req, res) => {
   try {
     const { organizationId, userId, role } = req.user;
@@ -4056,7 +4629,9 @@ const deletePendingSale = async (req, res) => {
 
     const sale = await Sale.findOne({ _id: id, organizationId }).lean();
     if (!sale) {
-      return res.status(404).json({ success: false, message: "Sale not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Sale not found" });
     }
 
     const hasAccess = await userHasLocationAccess({
@@ -4076,7 +4651,8 @@ const deletePendingSale = async (req, res) => {
     if (sale.salesChannel !== "pos") {
       return res.status(400).json({
         success: false,
-        message: "Only POS pending sales can be deleted via this endpoint",
+        message:
+          "Only POS pending sales can be deleted via this endpoint",
       });
     }
 
@@ -4087,9 +4663,6 @@ const deletePendingSale = async (req, res) => {
       });
     }
 
-    // Delete the pending sale. If a delivery fee was created for it, remove
-    // that too — but for STK sales we don't create delivery fees until after
-    // payment, so this is typically a no-op.
     await Sale.deleteOne({ _id: sale._id });
 
     if (sale.deliveryFeeId) {
@@ -4097,7 +4670,10 @@ const deletePendingSale = async (req, res) => {
         _id: sale.deliveryFeeId,
         organizationId,
       }).catch((e) =>
-        console.warn("[deletePendingSale] delivery cleanup failed:", e.message),
+        console.warn(
+          "[deletePendingSale] delivery cleanup failed:",
+          e.message,
+        ),
       );
     }
 
@@ -4112,25 +4688,94 @@ const deletePendingSale = async (req, res) => {
   }
 };
 
+// ---------------------------------------------------------------------------
+// Routes
+// ---------------------------------------------------------------------------
 router.post(
-  "/:id/mpesa-stk",
+  "/",
   requirePermission("create_sale"),
-  startMpesaStk,
+  validateLocationAccess,
+  createSale,
+);
+router.get(
+  "/reports/summary",
+  requirePermission("view_reports"),
+  getSalesSummary,
+);
+router.get(
+  "/reports/by-delivery-category",
+  requirePermission("view_reports"),
+  getDeliveryCategoryReport,
+);
+router.get(
+  "/reports/delivery-metrics",
+  requirePermission("view_reports"),
+  getDeliveryMetrics,
+);
+router.get(
+  "/reports/delivery-status-flow",
+  requirePermission("view_reports"),
+  getDeliveryStatusFlow,
+);
+router.get(
+  "/receivables",
+  requirePermission("view_sale_history"),
+  listReceivables,
+);
+router.get(
+  "/:id/receivable",
+  requirePermission("view_sale_history"),
+  getSaleReceivable,
 );
 router.get(
   "/:id/payment-status",
   requirePermission("create_sale"),
   getSalePaymentStatus,
 );
+router.get("/:id", requirePermission("view_sale_history"), getSale);
+router.get("/", requirePermission("view_sale_history"), listSales);
+router.post(
+  "/:id/payments",
+  requirePermission("create_sale"),
+  recordSalePayment,
+);
+router.post(
+  "/:id/mpesa-stk",
+  requirePermission("create_sale"),
+  startMpesaStk,
+);
 router.post(
   "/:id/mpesa-stk/mark-paid",
   requirePermission("create_sale"),
   markMpesaStkPaidManually,
 );
+router.post("/:id/void", requirePermission("refund_sale"), voidSale);
+router.post("/:id/refund", requirePermission("refund_sale"), refundSale);
+router.patch(
+  "/:id/payments/reallocate",
+  requirePermission("edit_sale"),
+  reallocateSalePayment,
+);
+router.patch(
+  "/:id/reservation",
+  requirePermission("edit_sale"),
+  editReservationSale,
+);
+router.patch(
+  "/:id/assign",
+  requirePermission("edit_sale"),
+  reassignSale,
+);
 router.delete(
   "/:id/pending",
   requirePermission("create_sale"),
   deletePendingSale,
+);
+
+router.post(
+  "/:id/mpesa-stk/cancel",
+  requirePermission("create_sale"),
+  cancelMpesaStk,
 );
 
 module.exports = router;
