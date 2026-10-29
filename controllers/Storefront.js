@@ -103,6 +103,10 @@ function publicProduct(p, variantAvailability) {
     id: v._id,
     sku: v.sku,
     title: (v.selectedOptions || []).map((o) => o.value).join(" / "),
+    selectedOptions: (v.selectedOptions || []).map((o) => ({
+      name: o.name,
+      value: o.value,
+    })),
     price: v.price,
     compareAtPrice: v.compareAtPrice,
     available: variantAvailability?.[String(v._id)] ?? null,
