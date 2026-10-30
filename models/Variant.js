@@ -16,6 +16,7 @@ const variantSchema = new Schema(
 
     sku: { type: String, required: true },        // synthesized: SHOP-{variantNumericId}
     sourceSku: { type: String, default: null },   // original Shopify sku (usually null)
+    optionsKey: { type: String, default: null },
 
     // ---- Shopify migration fields ----
     shopifyId: { type: String },
@@ -72,6 +73,16 @@ const variantSchema = new Schema(
   { timestamps: true }
 );
 
+variantSchema.index(
+  { organizationId: 1, productId: 1, optionsKey: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      status: "active",
+      optionsKey: { $type: "string" },
+    },
+  },
+);
 variantSchema.index({ organizationId: 1, productId: 1 });
 variantSchema.index({ organizationId: 1, sku: 1 }, { unique: true });
 variantSchema.index({ organizationId: 1, status: 1 });
