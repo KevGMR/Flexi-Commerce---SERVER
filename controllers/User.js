@@ -356,6 +356,16 @@ router.post("/login", loginLimiter, loginEmailLimiter, extractDeviceId, async (r
 
       res.cookie("refreshToken", refreshToken, getRefreshCookieOptions());
 
+      // Also fetch the full membership list for this user so the client
+      // can render the OrgSwitcher without an extra round-trip, and so
+      // a second device sees orgs joined elsewhere.
+      const allMemberships = await UserOrganization.find({
+        userId: user._id,
+        status: "active",
+      })
+        .populate("organizationId", "name slug status")
+        .lean();
+
       return res.status(200).json({
         message: "Logged in successfully",
         accessToken,
@@ -372,6 +382,14 @@ router.post("/login", loginLimiter, loginEmailLimiter, extractDeviceId, async (r
           permissions: orgPermissions,
           locations: membership.locations || [],
         },
+        organizations: allMemberships.map((m) => ({
+          organizationId: m.organizationId._id,
+          name: m.organizationId.name,
+          slug: m.organizationId.slug,
+          role: m.role,
+          status: m.organizationId.status,
+          locations: m.locations || [],
+        })),
       });
     }
 
@@ -429,6 +447,14 @@ router.post("/refresh", refreshLimiter, extractDeviceId, verifyRefreshTokenMiddl
       status: "active",
     });
 
+    const allMemberships = await UserOrganization.find({
+      userId: user._id,
+      status: "active",
+    })
+      .populate("organizationId", "name slug status")
+      .lean();
+
+
     if (!membership) {
       return res.status(403).json({ error: "No access to organization", code: "ORG_ACCESS_REVOKED" });
     }
@@ -471,6 +497,14 @@ router.post("/refresh", refreshLimiter, extractDeviceId, verifyRefreshTokenMiddl
         fullname: user.fullname,
         email: user.email,
       },
+      organizations: allMemberships.map((m) => ({
+        organizationId: m.organizationId._id,
+        name: m.organizationId.name,
+        slug: m.organizationId.slug,
+        role: m.role,
+        status: m.organizationId.status,
+        locations: m.locations || [],
+      })),
     });
   } catch (error) {
     console.error("Refresh token error:", error);
@@ -490,21 +524,23 @@ router.post("/refresh", refreshLimiter, extractDeviceId, verifyRefreshTokenMiddl
  */
 router.post("/logout", extractDeviceId, verifyToken, async (req, res) => {
   try {
-    const refreshToken = req.cookies?.refreshToken;
+    // Revoke every non-revoked refresh token for this user+device,
+    // not just the one presented in the cookie. This protects against
+    // the "logged back in on next reload" bug caused by multiple
+    // live refresh tokens (e.g. from before a switch-org rotation).
+    await RefreshToken.updateMany(
+      { userId: req.user.userId, deviceId: req.deviceId, revoked: false },
+      {
+        revoked: true,
+        revokedAt: new Date(),
+        revokedReason: "user_logout",
+      }
+    );
 
-    if (refreshToken) {
-      const hashedToken = crypto.createHash("sha256").update(refreshToken).digest("hex");
-
-      await RefreshToken.findOneAndUpdate(
-        { token: hashedToken, userId: req.user.userId, deviceId: req.deviceId },
-        {
-          revoked: true,
-          revokedAt: new Date(),
-          revokedReason: "user_logout",
-        }
-      );
-    }
-
+    // Clear the cookie with EXACTLY the attributes used to set it.
+    // getRefreshCookieOptions({ includeMaxAge: false }) uses the same
+    // sameSite/secure/path/domain env-driven values as login, so the
+    // browser will match and delete it.
     res.clearCookie("refreshToken", getRefreshCookieOptions({ includeMaxAge: false }));
 
     await logTokenEvent(
@@ -513,15 +549,13 @@ router.post("/logout", extractDeviceId, verifyToken, async (req, res) => {
       "logout",
       req.ip,
       req.get("user-agent"),
-      {
-        details: "User logged out",
-      }
+      { details: "User logged out" }
     );
 
-    res.status(200).json({ message: "Logged out successfully" });
+    return res.status(200).json({ message: "Logged out successfully" });
   } catch (error) {
     console.error("Logout error:", error);
-    res.status(500).json({ error: "Logout failed" });
+    return res.status(500).json({ error: "Logout failed" });
   }
 });
 
@@ -754,6 +788,14 @@ router.post("/create-organization", verifyToken, async (req, res) => {
       }
     );
 
+    const allMemberships = await UserOrganization.find({
+      userId: req.user.userId,
+      status: "active",
+    })
+      .populate("organizationId", "name slug status")
+      .lean();
+
+    // fall through to:
     return res.status(201).json({
       message: "Organization created successfully",
       organization: {
@@ -761,6 +803,14 @@ router.post("/create-organization", verifyToken, async (req, res) => {
         name: organization.name,
         slug: organization.slug,
       },
+      organizations: allMemberships.map((m) => ({
+        organizationId: m.organizationId._id,
+        name: m.organizationId.name,
+        slug: m.organizationId.slug,
+        role: m.role,
+        status: m.organizationId.status,
+        locations: m.locations || [],
+      })),
     });
   } catch (err) {
     console.error("Create organization error:", err);
@@ -817,6 +867,18 @@ router.post("/switch-organization", verifyToken, extractDeviceId, async (req, re
       organizationId
     );
 
+    // Revoke the OLD refresh token for this device. The RefreshToken
+    // document stores organizationId — if we don't revoke, a later
+    // /refresh call will re-sign an access token for the OLD org.
+    await RefreshToken.updateMany(
+      { userId: user._id, deviceId: req.deviceId, revoked: false },
+      {
+        revoked: true,
+        revokedAt: new Date(),
+        revokedReason: "role_changed",
+      }
+    );
+
     const { token: refreshToken } = await generateRefreshToken(
       user._id,
       req.deviceId,
@@ -834,10 +896,15 @@ router.post("/switch-organization", verifyToken, extractDeviceId, async (req, re
       "org_switched",
       req.ip,
       req.get("user-agent"),
-      {
-        details: `Switched to organization: ${org.name}`,
-      }
+      { details: `Switched to organization: ${org.name}` }
     );
+
+    const allMemberships = await UserOrganization.find({
+      userId: user._id,
+      status: "active",
+    })
+      .populate("organizationId", "name slug status")
+      .lean();
 
     return res.status(200).json({
       message: "Switched organization",
@@ -850,6 +917,14 @@ router.post("/switch-organization", verifyToken, extractDeviceId, async (req, re
         permissions: orgPermissions,
         locations: membership.locations || [],
       },
+      organizations: allMemberships.map((m) => ({
+        organizationId: m.organizationId._id,
+        name: m.organizationId.name,
+        slug: m.organizationId.slug,
+        role: m.role,
+        status: m.organizationId.status,
+        locations: m.locations || [],
+      })),
     });
   } catch (error) {
     console.error("Error switching organization:", error);

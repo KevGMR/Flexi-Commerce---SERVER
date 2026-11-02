@@ -43,8 +43,10 @@ const userOrganizationSchema = new Schema(
   { timestamps: true }
 );
 
+// Compound unique: a user may belong to many organizations, but only once
+// per organization. Do NOT change this to a single-field unique on userId.
 userOrganizationSchema.index({ userId: 1, organizationId: 1 }, { unique: true });
-userOrganizationSchema.index({ organizationId: 1 });
-userOrganizationSchema.index({ status: 1 });
+userOrganizationSchema.index({ organizationId: 1, status: 1 });
+userOrganizationSchema.index({ userId: 1, status: 1 });
 
 module.exports = mongoose.model("UserOrganization", userOrganizationSchema);

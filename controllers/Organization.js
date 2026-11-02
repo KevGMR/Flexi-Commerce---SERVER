@@ -15,7 +15,7 @@ const { sendOrganizationInvitation } = require("../services/emailNotifier");
 const { loginLimiter } = require("../middleware/rateLimiter");
 const vercel = require("../services/vercel");
 const secretBox = require("../services/secretBox");
-
+const { extractDeviceId } = require("../middleware/auth");
 
 const VALID_TAX_MODES = ["inclusive", "exclusive"];
 
@@ -225,6 +225,141 @@ function validateSectionConfig(type, config, i) {
       return { ok: false, error: `Unknown section type "${type}"` };
   }
 }
+
+router.get("/", verifyToken, async (req, res) => {
+  const memberships = await UserOrganization.find({ userId: req.user.userId, status: "active" })
+    .populate("organizationId").lean();
+  const orgs = memberships.map(m => ({
+    ...m.organizationId,
+    role: m.role,
+    permissions: m.permissions,
+  }));
+  return res.json({ organizations: orgs });
+});
+
+const RefreshToken = require("../models/RefreshToken");
+const {
+  generateAccessToken,
+  generateRefreshToken,
+  getRefreshCookieOptions,
+} = require("../utils/tokenManager");
+
+/**
+ * POST /organizations/:organizationId/switch
+ * Re-issues the access token (and rotates the refresh token) for a
+ * different organization the caller is a member of. Without rotating
+ * the refresh token, the next /refresh call re-signs the OLD org's
+ * token — the classic "switch reverts after 15 minutes" bug.
+ */
+router.post("/:organizationId/switch", verifyToken, extractDeviceId, async (req, res) => {
+  try {
+    const { organizationId } = req.params;
+    const userId = req.user.userId;
+
+    // Confirm active membership before issuing anything.
+    const membership = await UserOrganization.findOne({
+      userId,
+      organizationId,
+      status: "active",
+    }).lean();
+
+    if (!membership) {
+      return res
+        .status(403)
+        .json({ error: "You are not a member of that organization" });
+    }
+
+    const org = await Organization.findById(organizationId)
+      .select("_id name slug status")
+      .lean();
+
+    if (!org || org.status !== "active") {
+      return res
+        .status(404)
+        .json({ error: "Organization not found or inactive" });
+    }
+
+    // Effective permissions for the target org (role + customPermissions).
+    const effective = await getEffectivePermissionsForMembership({
+      userId,
+      organizationId,
+    });
+    const perms = effective?.permissions || membership.permissions || [];
+
+    // Revoke ALL current device refresh tokens before rotating. If we
+    // don't revoke, /refresh re-signs an access token bound to the OLD
+    // org, and the switch silently reverts after the access token
+    // expires (~15 min).
+    await RefreshToken.updateMany(
+      { userId, deviceId: req.deviceId, revoked: false },
+      {
+        revoked: true,
+        revokedAt: new Date(),
+        revokedReason: "role_changed",
+      },
+    );
+
+    const newAccessToken = generateAccessToken(
+      userId,
+      membership.role,
+      perms,
+      req.deviceId,
+      organizationId,
+    );
+
+    const { token: newRefreshToken } = await generateRefreshToken(
+      userId,
+      req.deviceId,
+      req.ip,
+      req.get("user-agent"),
+      organizationId,
+      req.deviceName,
+    );
+
+    res.cookie("refreshToken", newRefreshToken, getRefreshCookieOptions());
+
+    // Full org list so the client stores the fresh set (multi-org fix).
+    const allMemberships = await UserOrganization.find({
+      userId,
+      status: "active",
+    })
+      .populate("organizationId", "name slug status")
+      .lean();
+
+    await logTokenEvent(
+      userId,
+      organizationId,
+      "org_switched",
+      req.ip,
+      req.get("user-agent"),
+      { details: `Switched to ${org.name}` },
+    );
+
+    return res.status(200).json({
+      message: "Switched organization",
+      accessToken: newAccessToken,
+      organization: {
+        _id: org._id,
+        name: org.name,
+        slug: org.slug,
+        role: membership.role,
+        permissions: perms,
+        locations: membership.locations || [],
+      },
+      organizations: allMemberships.map((m) => ({
+        organizationId: m.organizationId._id,
+        name: m.organizationId.name,
+        slug: m.organizationId.slug,
+        role: m.role,
+        status: m.organizationId.status,
+        locations: m.locations || [],
+      })),
+    });
+  } catch (error) {
+    console.error("Error switching organization:", error);
+    return res.status(500).json({ error: "Failed to switch organization" });
+  }
+});
 
 /**
  * Get current organization details
