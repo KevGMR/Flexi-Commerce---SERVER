@@ -360,6 +360,65 @@ router.get("/products", async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /storefront/products/by-ids?ids=a,b,c
+//
+// MUST be registered before /products/:handle, otherwise Express treats
+// "by-ids" as a :handle param and this route is unreachable.
+// ---------------------------------------------------------------------------
+
+router.get("/products/by-ids", async (req, res) => {
+  try {
+    const org = req.storefrontOrg;
+    const organizationId = org._id;
+    const { ids = "" } = req.query;
+
+    const idList = String(ids)
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .filter((id) => mongoose.Types.ObjectId.isValid(id))
+      .slice(0, 50);
+
+    if (idList.length === 0) {
+      return res.status(200).json({ products: [], locationId: null });
+    }
+
+    const locationId = await resolveLocationId(req, org);
+
+    const products = await Product.find({
+      _id: { $in: idList },
+      organizationId,
+      status: "active",
+      published: true,
+    }).lean();
+
+    // Preserve the caller's order. Mongo's $in has no ordering guarantee.
+    const byId = new Map(products.map((p) => [String(p._id), p]));
+    const ordered = idList
+      .map((id) => byId.get(String(id)))
+      .filter(Boolean);
+
+    const productIds = ordered.map((p) => p._id);
+    const [availability, variantsByProduct] = await Promise.all([
+      loadAvailability(productIds, locationId, organizationId),
+      loadVariantsByProduct(productIds, organizationId),
+    ]);
+
+    const payload = ordered.map((p) =>
+      publicProduct(
+        { ...p, variants: variantsByProduct[String(p._id)] || [] },
+        availability,
+      ),
+    );
+
+    return res.status(200).json({ products: payload, locationId });
+  } catch (error) {
+    console.error("[Storefront] products by-ids error:", error);
+    return res.status(500).json({ error: "Failed to fetch products" });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /storefront/products/:handle
 // ---------------------------------------------------------------------------
 

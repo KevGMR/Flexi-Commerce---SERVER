@@ -165,13 +165,21 @@ function validateSectionConfig(type, config, i) {
     }
 
     case "banner": {
+      const bannerAlign = ["left", "center"].includes(config.align)
+        ? config.align
+        : "left";
       return {
         ok: true,
         config: {
+          heading: str(config.heading, 120),
+          subheading: str(config.subheading, 240),
+          ctaLabel: str(config.ctaLabel, 40),
+          ctaHref: str(config.ctaHref, 300),
           imageUrl: str(config.imageUrl, 600),
           imageUrlMobile: str(config.imageUrlMobile, 600),
           href: str(config.href, 300),
           alt: str(config.alt, 120),
+          align: bannerAlign,
         },
       };
     }
