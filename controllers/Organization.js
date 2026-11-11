@@ -1,3 +1,4 @@
+// server/controllers/Organization.js
 const express = require("express");
 const crypto = require("crypto");
 
@@ -91,13 +92,14 @@ function validateSectionConfig(type, config, i) {
   };
 
   switch (type) {
-        case "hero": {
+    case "hero": {
       const align = ["left", "center", "right"].includes(config.align)
         ? config.align
         : "left";
       return {
         ok: true,
         config: {
+          eyebrow: str(config.eyebrow, 40),
           heading: str(config.heading, 120),
           subheading: str(config.subheading, 240),
           ctaLabel: str(config.ctaLabel, 40),

@@ -10,8 +10,6 @@ const helmet = require("helmet");
 const compression = require("compression");
 const cookieParser = require("cookie-parser");
 
-
-
 require("dotenv").config();
 
 const dns = require("dns");
