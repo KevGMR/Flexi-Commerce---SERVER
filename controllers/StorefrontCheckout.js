@@ -12,6 +12,7 @@ const Organization = require("../models/Organization");
 const DeliveryFee = require("../models/DeliveryFee");
 const secretBox = require("../services/secretBox");
 const daraja = require("../services/daraja");
+const { resolveMpesaStkAvailability } = require("./Storefront");
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -358,9 +359,7 @@ router.post("/checkout", async (req, res) => {
       return res.status(400).json({ error: "customer.phone is required" });
     }
     if (!customer?.name || !customer.name.trim()) {
-      return res
-        .status(400)
-        .json({ error: "customer.name is required" });
+      return res.status(400).json({ error: "customer.name is required" });
     }
 
     const msisdn = daraja.normalizePhone(customer.phone);
@@ -372,10 +371,42 @@ router.post("/checkout", async (req, res) => {
     }
 
     const locationId = await resolveLocationId(org, req.query.locationId);
+    
     if (!locationId) {
       return res.status(400).json({
         error: "No active location available for this storefront",
         code: "NO_LOCATION",
+      });
+    }
+
+    // Load the location once, up front. Needed for the STK availability
+    // check below AND for tax calculation further down.
+    const location = await Location.findOne({
+      _id: locationId,
+      organizationId,
+      status: "active",
+    })
+      .select("taxRate taxMode mpesaStkEnabled")
+      .lean();
+
+    if (!location) {
+      return res.status(400).json({
+        error: "No active location available for this storefront",
+        code: "NO_LOCATION",
+      });
+    }
+
+    // Respect the admin's STK setting. daraja.enabled being true is not
+    // sufficient — the org must have mpesaStkEnabled true, unless the
+    // location explicitly overrides. Mirrors /storefront/org's response
+    // so the client's own gate agrees with the server.
+    const mpesaStkAvailable = resolveMpesaStkAvailability(fullOrg, location);
+
+    if (!mpesaStkAvailable) {
+      return res.status(400).json({
+        error:
+          "This store is not currently accepting M-Pesa payments online. Please contact the merchant directly.",
+        code: "MPESA_STK_DISABLED",
       });
     }
 
@@ -397,13 +428,10 @@ router.post("/checkout", async (req, res) => {
       delivery,
     );
 
-    // ---- Tax from location ----
-    const location = await Location.findById(locationId)
-      .select("taxRate taxMode")
-      .lean();
-    const taxRate = Number(location?.taxRate) || 0;
+    // ---- Tax from location (already loaded above) ----
+    const taxRate = Number(location.taxRate) || 0;
     const taxMode =
-      location?.taxMode === "exclusive" ? "exclusive" : "inclusive";
+      location.taxMode === "exclusive" ? "exclusive" : "inclusive";
 
     let taxAmount = 0;
     let itemsTotal = subtotal;

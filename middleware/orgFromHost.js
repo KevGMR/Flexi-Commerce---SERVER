@@ -46,7 +46,7 @@ async function orgFromHost(req, res, next) {
       slug: cleanSlug,
       status: "active",
     })
-      .select("_id name slug settings website")
+      .select("_id name slug settings website daraja.enabled daraja.mpesaStkEnabled")
       .lean();
 
     if (!org) {
