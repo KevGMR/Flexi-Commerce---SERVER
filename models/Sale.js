@@ -488,7 +488,6 @@ saleSchema.index(
     partialFilterExpression: { 
       idempotencyKey: { $type: "string" }
     },
-    sparse: true,
   },
 );
 
