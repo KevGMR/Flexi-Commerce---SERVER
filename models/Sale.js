@@ -485,7 +485,10 @@ saleSchema.index(
   { organizationId: 1, idempotencyKey: 1 },
   {
     unique: true,
-    partialFilterExpression: { idempotencyKey: { $type: "string" } },
+    partialFilterExpression: { 
+      idempotencyKey: { $type: "string" }
+    },
+    sparse: true,
   },
 );
 
