@@ -416,6 +416,248 @@ router.post("/login", loginLimiter, loginEmailLimiter, extractDeviceId, async (r
 });
 
 /**
+ * POST /users/accept-invitation
+ * Accept an invitation as an existing user. NO auth required — the
+ * invitation token (a 32-byte crypto random delivered only by email)
+ * is the credential, exactly like a password-reset link.
+ *
+ * If the email on the invitation does not correspond to a user yet,
+ * returns { code: "SIGNUP_REQUIRED", invitation: {...} } with HTTP 404
+ * so the client can route to /auth/signup?invitation=<token>.
+ *
+ * Otherwise: creates UserOrganization, marks invitation accepted,
+ * revokes any existing refresh tokens for this device, issues a fresh
+ * access + refresh pair (rotated to the newly joined org), sets the
+ * httpOnly cookie, and returns the org list. The caller is now
+ * authenticated.
+ */
+router.post(
+  "/accept-invitation",
+  extractDeviceId,
+  async (req, res) => {
+    try {
+      const { invitationToken } = req.body;
+
+      if (!invitationToken || typeof invitationToken !== "string") {
+        return res.status(400).json({
+          error: "invitationToken is required",
+          code: "INVITATION_TOKEN_MISSING",
+        });
+      }
+
+      // 1. Load the invitation — must be pending and not expired.
+      const invitation = await Invitation.findOne({
+        token: invitationToken,
+        status: "pending",
+        expiresAt: { $gt: new Date() },
+      })
+        .populate("organizationId", "name slug status")
+        .lean();
+
+      if (!invitation) {
+        return res.status(400).json({
+          error: "This invitation is invalid or has expired.",
+          code: "INVITATION_INVALID",
+        });
+      }
+
+      if (!invitation.organizationId || invitation.organizationId.status !== "active") {
+        return res.status(403).json({
+          error: "This organization is no longer active.",
+          code: "ORG_INACTIVE",
+        });
+      }
+
+      // 2. Find the invited user by email.
+      const user = await User.findOne({
+        email: invitation.email.toLowerCase(),
+      });
+
+      // 2a. No user yet → client should create an account first.
+      if (!user) {
+        return res.status(404).json({
+          error: "No account exists for this email. Create one to accept.",
+          code: "SIGNUP_REQUIRED",
+          invitation: {
+            email: invitation.email,
+            role: invitation.role,
+            organizationName: invitation.organizationId.name,
+            organizationSlug: invitation.organizationId.slug,
+          },
+        });
+      }
+
+      // 2b. User exists but is not active.
+      if (user.status !== "active") {
+        return res.status(403).json({
+          error: `Your account is ${user.status}. Please contact support.`,
+          code: `ACCOUNT_${user.status.toUpperCase()}`,
+        });
+      }
+
+      // 3. Idempotency — if they're already a member, don't error.
+      //    Mark invitation accepted if still pending, and issue tokens
+      //    for the target org either way.
+      const existingMembership = await UserOrganization.findOne({
+        userId: user._id,
+        organizationId: invitation.organizationId._id,
+      });
+
+      let membershipRole = invitation.role;
+      let membershipLocations = invitation.locations || [];
+
+      if (existingMembership && existingMembership.status === "active") {
+        membershipRole = existingMembership.role;
+        membershipLocations = existingMembership.locations || [];
+
+        await Invitation.updateOne(
+          { _id: invitation._id, status: "pending" },
+          {
+            status: "accepted",
+            acceptedBy: user._id,
+            acceptedAt: new Date(),
+          }
+        );
+      } else {
+        // 4. Create (or reactivate) the membership.
+        const permissions = await getMembershipPermissionsForRole(
+          invitation.role
+        );
+
+        if (existingMembership) {
+          // Previously inactive — reactivate with the new role.
+          existingMembership.status = "active";
+          existingMembership.role = invitation.role;
+          existingMembership.permissions = permissions;
+          existingMembership.locations =
+            invitation.locations || existingMembership.locations;
+          existingMembership.joinedAt = new Date();
+          await existingMembership.save();
+        } else {
+          try {
+            await UserOrganization.create({
+              userId: user._id,
+              organizationId: invitation.organizationId._id,
+              role: invitation.role,
+              permissions,
+              locations: invitation.locations || [],
+              invitedBy: invitation.invitedBy,
+              status: "active",
+            });
+          } catch (createErr) {
+            if (createErr.code !== 11000) throw createErr;
+            // E11000 — someone raced us. Continue; membership exists.
+          }
+        }
+
+        await Invitation.updateOne(
+          { _id: invitation._id, status: "pending" },
+          {
+            status: "accepted",
+            acceptedBy: user._id,
+            acceptedAt: new Date(),
+          }
+        );
+      }
+
+      // 5. Effective permissions for the target org.
+      const effectiveMembership = await getEffectivePermissionsForMembership({
+        userId: user._id,
+        organizationId: invitation.organizationId._id,
+      });
+      const orgPermissions =
+        effectiveMembership?.permissions ||
+        (await getMembershipPermissionsForRole(membershipRole));
+
+      // 6. Revoke any live refresh tokens for this device so /refresh
+      //    can't resurrect a token bound to a previous org. Same
+      //    pattern as /users/switch-organization.
+      await RefreshToken.updateMany(
+        { userId: user._id, deviceId: req.deviceId, revoked: false },
+        {
+          revoked: true,
+          revokedAt: new Date(),
+          revokedReason: "role_changed",
+        }
+      );
+
+      // 7. Issue fresh tokens scoped to the newly joined org.
+      const accessToken = generateAccessToken(
+        user._id,
+        membershipRole,
+        orgPermissions,
+        req.deviceId,
+        invitation.organizationId._id
+      );
+
+      const { token: refreshToken } = await generateRefreshToken(
+        user._id,
+        req.deviceId,
+        req.ip,
+        req.get("user-agent"),
+        invitation.organizationId._id,
+        req.deviceName
+      );
+
+      res.cookie("refreshToken", refreshToken, getRefreshCookieOptions());
+
+      user.lastLogin = new Date();
+      await user.save();
+
+      await logTokenEvent(
+        user._id,
+        invitation.organizationId._id,
+        "invitation_accepted",
+        req.ip,
+        req.get("user-agent"),
+        {
+          details: `Accepted invitation to ${invitation.organizationId.name} as ${membershipRole}`,
+        }
+      );
+
+      // 8. Full membership list so client can render OrgSwitcher.
+      const allMemberships = await UserOrganization.find({
+        userId: user._id,
+        status: "active",
+      })
+        .populate("organizationId", "name slug status")
+        .lean();
+
+      return res.status(200).json({
+        message: "Invitation accepted",
+        accessToken,
+        user: {
+          _id: user._id,
+          email: user.email,
+          fullname: user.fullname,
+        },
+        organization: {
+          _id: invitation.organizationId._id,
+          name: invitation.organizationId.name,
+          slug: invitation.organizationId.slug,
+          role: membershipRole,
+          permissions: orgPermissions,
+          locations: membershipLocations,
+        },
+        organizations: allMemberships.map((m) => ({
+          organizationId: m.organizationId._id,
+          name: m.organizationId.name,
+          slug: m.organizationId.slug,
+          role: m.role,
+          status: m.organizationId.status,
+          locations: m.locations || [],
+        })),
+      });
+    } catch (error) {
+      console.error("Accept invitation error:", error);
+      return res
+        .status(500)
+        .json({ error: "Failed to accept invitation" });
+    }
+  }
+);
+
+/**
  * Refresh access token
  * POST /users/refresh
  */

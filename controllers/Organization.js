@@ -1183,14 +1183,7 @@ router.post("/:organizationId/invite", verifyToken, async (req, res) => {
 
     // Send invitation email with accept URL
     const inviter = await User.findById(req.user.userId).lean();
-    const invitationUrl = `${process.env.CLIENT_URL}/auth/signup?invitation=${encodeURIComponent(token)}`;
-    await sendOrganizationInvitation(
-      email,
-      inviter.fullname,
-      org.name,
-      role,
-      invitationUrl,
-    );
+    const invitationUrl = `${process.env.CLIENT_URL}/auth/accept-invitation?token=${encodeURIComponent(token)}`;
 
     await logTokenEvent(
       req.user.userId,
@@ -1408,7 +1401,7 @@ router.post(
       const inviter = await User.findById(invitation.invitedBy).lean();
 
       // Send invitation email
-      const invitationUrl = `${process.env.CLIENT_URL}/auth/signup?invitation=${encodeURIComponent(invitation.token)}`;
+      const invitationUrl = `${process.env.CLIENT_URL}/auth/accept-invitation?token=${encodeURIComponent(invitation.token)}`;
       await sendOrganizationInvitation(
         invitation.email,
         inviter?.fullname || "Team member",
